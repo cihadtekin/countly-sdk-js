@@ -108,6 +108,7 @@ class CountlyClass {
     #recordingBridge = null;
     #SCRecording = {};
     #recordingStream = null;
+    #recordingInit = null;
     // Interaction capture shared by the public track_* calls and Behaviour studies:
     // each kind is listened to once; "public" means the app asked for it.
     #interactions = { clicks: null, scrolls: null, inputs: null };
@@ -821,6 +822,8 @@ class CountlyClass {
         this.#pushNotificationListener = typeof pushListener === "function" ? pushListener : null;
         this.#HealthCheck.loadState();
         this.#crashFilterCallback = getConfig("crash_filter_callback", ob, null);
+        // Session Replay settings for the recording module (countly_recording.js); the server's rec_* settings override them
+        this.#recordingInit = getConfig("recording", ob, null);
 
         this.#serverConfigCache = this.#getValueFromStorage("cly_config");
         if (!this.#serverConfigCache) {
@@ -10385,8 +10388,11 @@ class CountlyClass {
         recording: {
             attach: (bridge) => { this.#recordingBridge = bridge; },
             setStream: (rsid) => { this.#recordingStream = rsid || null; },
+            initConfig: () => this.#recordingInit,
             serverConfig: () => this.#SCRecording,
             hasConsent: () => this.check_consent(featureEnums.SESSION_REPLAY),
+            // nothing is recorded for an ignored (bot, opted-out) visitor or while the server turned tracking off
+            isTracking: () => !this.ignore_visitor && this.#SCTrackingAll !== false,
             // ts = the recording's t0, which for a triggered recording is in the past
             recordStart: (segmentation, timestamp) => {
                 if (this.check_consent(featureEnums.SESSION_REPLAY)) {
