@@ -553,17 +553,34 @@ declare module "countly-sdk-web" {
       segments?: object
     ): void;
 
-    /**
-     * Track all clicks on this page
-     * @param {Object} [parent] - DOM object whose children to track, by default it is document body
-     */
-    function track_clicks(parent?: Object): void;
+    /** Frustration signals track_clicks records, each on unless set to false */
+    interface ClickTrackingOptions {
+      /** rage_click: three or more clicks within a second and 30 px */
+      rage?: boolean;
+      /** dead_click: a click on something clickable that changed nothing on the page within a second */
+      dead?: boolean;
+      /** error_click: a click followed by a JavaScript error within a second */
+      error?: boolean;
+    }
 
     /**
-     * Track all scrolls on this page
+     * Track all clicks on this page, with rage, dead and error clicks
+     * @param {Object} [parent] - DOM object whose children to track, by default it is document body
+     * @param {ClickTrackingOptions} [options] - frustration signals to record; also accepted as the only argument
+     */
+    function track_clicks(parent?: Object | ClickTrackingOptions, options?: ClickTrackingOptions): void;
+
+    /**
+     * Track all scrolls on this page: the deepest point per view, and where scrolling stopped
      * @param {Object} [parent] - DOM object whose children to track, by default it is document body
      */
     function track_scrolls(parent?: Object): void;
+
+    /**
+     * Track the fields users change and the forms they submit, never their values (needs the "forms" consent)
+     * @param {Object} [parent] - DOM object whose children to track, by default it is document body
+     */
+    function track_inputs(parent?: Object): void;
 
     /**
      * Generate custom event for all links that were clicked on this page

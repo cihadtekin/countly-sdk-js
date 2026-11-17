@@ -78,6 +78,7 @@ test_mode_rq
 track_clicks
 track_errors
 track_forms
+track_inputs
 track_links
 track_pageview
 track_scrolls
@@ -99,6 +100,10 @@ userData.unset
 user_details
 
 // Declarations in the TypeScript definitions
+"countly-sdk-web".Countly.ClickTrackingOptions.dead: dead?: boolean;
+"countly-sdk-web".Countly.ClickTrackingOptions.error: error?: boolean;
+"countly-sdk-web".Countly.ClickTrackingOptions.rage: rage?: boolean;
+"countly-sdk-web".Countly.ClickTrackingOptions: interface ClickTrackingOptions { }
 "countly-sdk-web".Countly.Content.enterContentZone: enterContentZone(contentFilterCallback?: (contentURLParams: object) => boolean): void;
 "countly-sdk-web".Countly.Content.exitContentZone: exitContentZone(): void;
 "countly-sdk-web".Countly.Content.refreshContentZone: refreshContentZone(): void;
@@ -177,9 +182,10 @@ user_details
 "countly-sdk-web".Countly.set_id: function set_id(newId: string): void;
 "countly-sdk-web".Countly.set_push_notification_listener: function set_push_notification_listener(listener: ((event: PushNotificationEvent) => void) | null): void;
 "countly-sdk-web".Countly.start_event: function start_event(key: string): void;
-"countly-sdk-web".Countly.track_clicks: function track_clicks(parent?: Object): void;
+"countly-sdk-web".Countly.track_clicks: function track_clicks(parent?: Object | ClickTrackingOptions, options?: ClickTrackingOptions): void;
 "countly-sdk-web".Countly.track_errors: function track_errors(segments?: Object): void;
 "countly-sdk-web".Countly.track_forms: function track_forms(parent?: Object, trackHidden?: boolean): void;
+"countly-sdk-web".Countly.track_inputs: function track_inputs(parent?: Object): void;
 "countly-sdk-web".Countly.track_links: function track_links(parent?: Object): void;
 "countly-sdk-web".Countly.track_pageview: function track_pageview(page?: string, ignoreList?: string[], viewSegments?: object): void;
 "countly-sdk-web".Countly.track_scrolls: function track_scrolls(parent?: Object): void;

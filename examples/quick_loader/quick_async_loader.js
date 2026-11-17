@@ -87,6 +87,7 @@
         "track_forms",
         "track_clicks",
         "track_scrolls",
+        "track_inputs",
         "track_links",
         "recordError",
         "change_id",

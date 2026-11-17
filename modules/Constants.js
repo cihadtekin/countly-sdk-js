@@ -17,6 +17,8 @@ var featureEnums = {
     REMOTE_CONFIG: "remote-config",
     PUSH: "push",
     CONTENT: "content",
+    // Session Replay. Always needs an explicit add_consent, even when require_consent is off.
+    SESSION_REPLAY: "session_replay",
 };
 
 // every feature in featureEnums, alphabetically, the order Countly.features lists them in
@@ -32,7 +34,8 @@ var featureList = Object.keys(featureEnums).map(function (key) {
     [CLY]_view - "views" consent
     [CLY]_orientation - "users" consent
     [CLY]_push_action - "push" consent
-    [CLY]_action - "clicks" or "scroll" consent
+    [CLY]_action - "clicks" or "scroll" consent ("forms" for input and submit)
+    [CLY]_recording_start - "session_replay" consent
  */
 var internalEventKeyEnums = {
     NPS: "[CLY]_nps",
@@ -42,6 +45,7 @@ var internalEventKeyEnums = {
     ORIENTATION: "[CLY]_orientation",
     ACTION: "[CLY]_action",
     PUSH_ACTION: "[CLY]_push_action",
+    RECORDING_START: "[CLY]_recording_start",
 };
 
 var internalEventKeyEnumsArray = Object.values(internalEventKeyEnums);

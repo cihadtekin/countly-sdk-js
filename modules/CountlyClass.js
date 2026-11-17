@@ -1,3 +1,4 @@
+import { actionTarget, createClickOutcomeWatcher, createRageDetector, describeElement, isIgnored } from "./Interactions.js";
 import { DeviceIdTypeInternalEnums, SDK_NAME, SDK_VERSION, configurationDefaultValues, contentReservedSegmentationKeys, contentReservedSegmentationPrefix, featureEnums, featureList, healthCheckCounterEnum, internalEventKeyEnums, internalEventKeyEnumsArray, logGatheringDefaultValues, logLevelEnums, logLevelToListenerName, logLevelToWireChar, logLineConsent, pushConstants, pushMessageTypes, pushStorageKeys, pushWorkerParams, tabHandoverTimes, urlParseRE } from "./Constants.js";
 import { runConnectionTest, probeViaFetch, capReport } from "./ConnectionTest.js";
 import {
@@ -102,6 +103,14 @@ class CountlyClass {
     #isScrollRegistryOpen;
     #scrollRegistryTopPosition;
     #trackingScrolls;
+    // Session Replay: the recording module (countly_recording.js) attaches a bridge here;
+    // #SCRecording keeps the server's rec_* settings and this device's study answer (rec_st).
+    #recordingBridge = null;
+    #SCRecording = {};
+    #recordingStream = null;
+    // Interaction capture shared by the public track_* calls and Behaviour studies:
+    // each kind is listened to once; "public" means the app asked for it.
+    #interactions = { clicks: null, scrolls: null, inputs: null };
     #currentViewId;
     #previousViewId;
     #freshUTMTags;
@@ -613,6 +622,17 @@ class CountlyClass {
             return;
         }
         var cache = mainCache.c;
+
+        var recording = {};
+        for (var recKey in cache) {
+            if (recKey === "rec" || recKey.indexOf("rec_") === 0) {
+                recording[recKey] = cache[recKey];
+            }
+        }
+        this.#SCRecording = recording;
+        if (this.#recordingBridge && typeof this.#recordingBridge.onServerConfig === "function") {
+            this.#recordingBridge.onServerConfig(recording);
+        }
 
         if (cache.hasOwnProperty("networking")) {
             this.#SCNetwork = cache.networking;
@@ -2106,6 +2126,10 @@ class CountlyClass {
     */
     check_consent = (feature) => {
         this.#log(logLevelEnums.INFO, "check_consent, Checking if consent is given for specific feature:[" + feature + "]");
+        if (feature === featureEnums.SESSION_REPLAY) {
+            // recording the screen always needs an explicit consent, whatever require_consent says
+            return !!(this.#consents[feature] && this.#consents[feature].optin);
+        }
         if (!this.#SCEnableConsentRequired) {
             // we don't need to have specific consents
             this.#log(logLevelEnums.INFO, "check_consent, require_consent is off, no consent is necessary");
@@ -2195,6 +2219,9 @@ class CountlyClass {
                     this.#consents[feature].optin = true;
                     this.#releaseHeldLogLines();
                     this.#updateConsent();
+                    if (feature === featureEnums.SESSION_REPLAY && this.#recordingBridge && typeof this.#recordingBridge.onConsent === "function") {
+                        this.#recordingBridge.onConsent(true);
+                    }
                     setTimeout(() => {
                         if (feature === featureEnums.SESSIONS && this.#lastParams.begin_session) {
                             var pendingSession = this.#lastParams.begin_session;
@@ -2255,6 +2282,9 @@ class CountlyClass {
             else {
                 var wasOptedIn = this.#consents[feature].optin === true;
                 this.#consents[feature].optin = false;
+                if (feature === featureEnums.SESSION_REPLAY && wasOptedIn && this.#recordingBridge && typeof this.#recordingBridge.onConsent === "function") {
+                    this.#recordingBridge.onConsent(false);
+                }
                 // this is core feature
                 if (enforceConsentUpdate && wasOptedIn) {
                     this.#updateConsent();
@@ -2690,6 +2720,9 @@ class CountlyClass {
                 break;
             case internalEventKeyEnums.PUSH_ACTION:
                 respectiveConsent = this.check_consent(featureEnums.PUSH);
+                break;
+            case internalEventKeyEnums.RECORDING_START:
+                respectiveConsent = this.check_consent(featureEnums.SESSION_REPLAY);
                 break;
             default:
                 respectiveConsent = this.#SCTrackingEvents ? this.check_consent(featureEnums.EVENTS) : false;
@@ -3442,6 +3475,10 @@ class CountlyClass {
         this.#saveEventQueue();
         this.#log(logLevelEnums.INFO, "With event ID: [" + e.id + "], successfully adding the last event:", e);
         this.#handleJourneyTrigger(initialKey, e.id);
+        if (this.#recordingBridge && typeof this.#recordingBridge.onEvent === "function") {
+            // event and view triggers of Session Replay
+            this.#recordingBridge.onEvent(e);
+        }
     }
 
     /**
@@ -4781,59 +4818,184 @@ class CountlyClass {
     * Track all clicks on this page
     * @param {Object=} parent - DOM object which children to track, by default it is document body
     * */
-    track_clicks = (parent) => {
+    track_clicks = (parent, options) => {
         if (!isBrowser) {
             this.#log(logLevelEnums.WARNING, "track_clicks, window object is not available. Not tracking clicks.");
             return;
+        }
+        // track_clicks({ rage, dead, error }) without a parent
+        if (parent && typeof parent === "object" && !parent.nodeType && !parent.addEventListener) {
+            options = parent;
+            parent = null;
         }
         this.#log(logLevelEnums.INFO, "track_clicks, Starting to track clicks");
         if (parent) {
             this.#log(logLevelEnums.INFO, "track_clicks, Tracking the specified children:[" + parent + "]");
         }
-        parent = parent || document;
+        this.#interactions.clicks = "public";
+        this.#startClickTracking(parent || document, options || {}, null);
+    };
+
+    /**
+     * Listen to clicks under parent and record [CLY]_action clicks and frustration signals.
+     * @param {Object} parent - DOM node to listen on
+     * @param {Object} options - {rage, dead, error}: each frustration signal, on unless false
+     * @param {function|null} gate - when given, events are recorded only while it returns true
+     *   (Behaviour studies collecting interactions for an app that does not track clicks itself)
+     */
+    #startClickTracking = (parent, options, gate) => {
+        var frustration = {
+            rage: options.rage !== false,
+            dead: options.dead !== false,
+            error: options.error !== false
+        };
+        var isOn = () => !gate || gate();
         var shouldProcess = true;
+        var isRage = createRageDetector();
+        var watchOutcome = createClickOutcomeWatcher((type, target) => {
+            if (isOn() && frustration[type === "dead_click" ? "dead" : "error"]) {
+                this.#recordInteraction(type, target, null);
+            }
+        });
         /**
          *  Process click information
          *  @param {Event} event - click event
          */
         var processClick = (event) => {
-            if (shouldProcess) {
-                shouldProcess = false;
+            if (!isOn() || !this.check_consent(featureEnums.CLICKS)) {
+                return;
+            }
+            var target = actionTarget(get_event_target(event));
+            if (isIgnored(target)) {
+                return;
+            }
+            get_page_coord(event);
+            if (frustration.rage && isRage(Date.now(), event.clientX || 0, event.clientY || 0)) {
+                this.#recordInteraction("rage_click", target, event);
+            }
+            if (frustration.dead || frustration.error) {
+                watchOutcome(target);
+            }
+            // a click a second, unless a recording is running: then every click is a marker on its timeline
+            var recording = this.#recordingBridge && this.#recordingBridge.isRecording && this.#recordingBridge.isRecording();
+            if (!shouldProcess && !recording) {
+                return;
+            }
+            shouldProcess = false;
+            setTimeout(() => {
+                shouldProcess = true;
+            }, 1000);
+            if (typeof event.pageX !== "undefined" && typeof event.pageY !== "undefined") {
+                this.#recordInteraction("click", target, event);
+            }
+        };
+        add_event_listener(parent, "click", processClick);
+    };
 
-                // cross browser click coordinates
-                get_page_coord(event);
-                if (typeof event.pageX !== "undefined" && typeof event.pageY !== "undefined") {
-                    var height = getDocHeight();
-                    var width = getDocWidth();
-
-                    // record click event
-                    if (this.check_consent(featureEnums.CLICKS)) {
-                        var segments = {
-                            type: "click",
-                            x: event.pageX,
-                            y: event.pageY,
-                            width: width,
-                            height: height,
-                            view: this.getViewUrl()
-                        };
-                        // truncate new segment
-                        segments = truncateObject(segments, this.#SCLimitKeyLength, this.#SCLimitValueSize , this.#SCLimitSegmentationValues, "processClick", this.#log);
-                        if (this.track_domains) {
-                            segments.domain = window.location.hostname;
-                        }
-                        this.#add_cly_events({
-                            key: internalEventKeyEnums.ACTION,
-                            segmentation: segments
-                        });
-                    }
-                }
-                setTimeout(() => {
-                    shouldProcess = true;
-                }, 1000);
+    /**
+     * Record one [CLY]_action interaction: where it happened on the page and in the viewport,
+     * and which element it was (with its node id in the screen recording, while recording).
+     * @param {string} type - click, rage_click, dead_click, error_click, input or submit
+     * @param {Element} target - the element
+     * @param {Event|null} event - the pointer event, when there is one
+     */
+    #recordInteraction = (type, target, event) => {
+        var segments = {
+            type: type,
+            width: getDocWidth(),
+            height: getDocHeight(),
+            vw: window.innerWidth,
+            vh: window.innerHeight,
+            sx: Math.round(window.scrollX || 0),
+            sy: Math.round(window.scrollY || 0),
+            view: this.getViewUrl()
+        };
+        if (event && typeof event.pageX !== "undefined") {
+            segments.x = Math.round(event.pageX);
+            segments.y = Math.round(event.pageY);
+        }
+        else if (target && target.getBoundingClientRect) {
+            var box = target.getBoundingClientRect();
+            segments.x = Math.round(box.left + box.width / 2 + segments.sx);
+            segments.y = Math.round(box.top + box.height / 2 + segments.sy);
+        }
+        if (target) {
+            var bridge = this.#recordingBridge;
+            var described = describeElement(target, {
+                maskAllText: !!(bridge && bridge.maskAllText && bridge.maskAllText()),
+                nodeId: bridge && bridge.nodeId
+            });
+            for (var key in described) {
+                segments[key] = described[key];
             }
         }
-        // add any events you want
-        add_event_listener(parent, "click", processClick);
+        segments = truncateObject(segments, this.#SCLimitKeyLength, this.#SCLimitValueSize, this.#SCLimitSegmentationValues, "recordInteraction", this.#log);
+        if (this.track_domains) {
+            segments.domain = window.location.hostname;
+        }
+        this.#add_cly_events({
+            key: internalEventKeyEnums.ACTION,
+            segmentation: segments
+        });
+    };
+
+    /**
+    * Track the fields users change and the forms they submit, without their values, as
+    * [CLY]_action input and submit events (needs the "forms" consent)
+    * @param {Object=} parent - DOM object which children to track, by default it is document body
+    * */
+    track_inputs = (parent) => {
+        if (!isBrowser) {
+            this.#log(logLevelEnums.WARNING, "track_inputs, window object is not available. Not tracking inputs.");
+            return;
+        }
+        this.#log(logLevelEnums.INFO, "track_inputs, Starting to track inputs");
+        this.#interactions.inputs = "public";
+        this.#startInputTracking(parent || document, null);
+    };
+
+    /**
+     * Behaviour studies with "Collect interaction events" capture clicks, scrolls and inputs while a
+     * study recording runs, also when the app never called the track_* functions. Each kind the app
+     * already tracks itself is left to its own listener, so nothing is recorded twice.
+     * @param {function} whileRecording - true while a study recording runs
+     */
+    #enableStudyInteractions = (whileRecording) => {
+        if (!isBrowser) {
+            return;
+        }
+        if (!this.#interactions.clicks) {
+            this.#interactions.clicks = "study";
+            this.#startClickTracking(document, {}, () => this.#interactions.clicks === "study" && whileRecording());
+        }
+        if (!this.#interactions.scrolls) {
+            this.#interactions.scrolls = "study";
+            this.#startScrollStopTracking(window, () => this.#interactions.scrolls === "study" && whileRecording());
+        }
+        if (!this.#interactions.inputs) {
+            this.#interactions.inputs = "study";
+            this.#startInputTracking(document, () => this.#interactions.inputs === "study" && whileRecording());
+        }
+    };
+
+    /**
+     * @param {Object} parent - DOM node to listen on
+     * @param {function|null} gate - when given, events are recorded only while it returns true
+     */
+    #startInputTracking = (parent, gate) => {
+        var record = (type) => (event) => {
+            if ((gate && !gate()) || !this.check_consent(featureEnums.FORMS)) {
+                return;
+            }
+            var target = get_event_target(event);
+            if (!target || isIgnored(target)) {
+                return;
+            }
+            this.#recordInteraction(type, target, null);
+        };
+        // capture phase: a page that stops propagation still has its fields counted
+        parent.addEventListener("change", record("input"), true);
+        parent.addEventListener("submit", record("submit"), true);
     };
 
     /**
@@ -4855,6 +5017,47 @@ class CountlyClass {
 
         add_event_listener(parent, "scroll", this.#processScroll);
         add_event_listener(parent, "beforeunload", this.#processScrollView);
+        this.#interactions.scrolls = "public";
+        this.#startScrollStopTracking(parent, null);
+    };
+
+    /**
+     * Record [CLY]_action scroll_stop when the page's scrolling settles after moving at least
+     * a quarter of the viewport: "the user scrolled to the pricing table", without a stream of positions.
+     * @param {Object} parent - window or the scrolled element
+     * @param {function|null} gate - when given, events are recorded only while it returns true
+     */
+    #startScrollStopTracking = (parent, gate) => {
+        var lastStop = window.scrollY || 0;
+        var timer = null;
+        add_event_listener(parent, "scroll", () => {
+            clearTimeout(timer);
+            timer = setTimeout(() => {
+                var y = window.scrollY || 0;
+                if (Math.abs(y - lastStop) < window.innerHeight / 4) {
+                    return;
+                }
+                lastStop = y;
+                if ((gate && !gate()) || !this.check_consent(featureEnums.SCROLLS)) {
+                    return;
+                }
+                var segments = {
+                    type: "scroll_stop",
+                    y: Math.round(y + window.innerHeight),
+                    width: getDocWidth(),
+                    height: getDocHeight(),
+                    vw: window.innerWidth,
+                    vh: window.innerHeight,
+                    sx: Math.round(window.scrollX || 0),
+                    sy: Math.round(y),
+                    view: this.getViewUrl()
+                };
+                if (this.track_domains) {
+                    segments.domain = window.location.hostname;
+                }
+                this.#add_cly_events({ key: internalEventKeyEnums.ACTION, segmentation: segments });
+            }, 500);
+        });
     };
 
     /**
@@ -6570,6 +6773,10 @@ class CountlyClass {
             req.crash = JSON.stringify(obj);
 
             this.#toRequestQueue(req);
+            if (this.#recordingBridge && typeof this.#recordingBridge.onCrash === "function") {
+                // crash trigger of Session Replay
+                this.#recordingBridge.onCrash({ nonfatal: !!nonfatal });
+            }
         }
     };
 
@@ -7322,6 +7529,10 @@ class CountlyClass {
     #prepareRequest = (request) => {
         request.app_key = this.app_key;
         request.device_id = this.device_id;
+        // Set when the request is created, so a queued request keeps the stream that produced it
+        if (this.#recordingStream && !request.rsid) {
+            request.rsid = this.#recordingStream;
+        }
         request.sdk_name = this.#sdkName;
         request.sdk_version = this.#sdkVersion;
         request.t = this.#deviceIdType;
@@ -10169,7 +10380,22 @@ class CountlyClass {
         flushLogBuffer: () => this.#flushLogBuffer(),
         sendPushToken: this.#sendPushToken,
         urlBase64ToUint8Array: this.#urlBase64ToUint8Array,
-        isPushSupported: this.#isPushSupported
+        isPushSupported: this.#isPushSupported,
+        // Session Replay: the recording module (countly_recording.js) attaches through these
+        recording: {
+            attach: (bridge) => { this.#recordingBridge = bridge; },
+            setStream: (rsid) => { this.#recordingStream = rsid || null; },
+            serverConfig: () => this.#SCRecording,
+            hasConsent: () => this.check_consent(featureEnums.SESSION_REPLAY),
+            // ts = the recording's t0, which for a triggered recording is in the past
+            recordStart: (segmentation, timestamp) => {
+                if (this.check_consent(featureEnums.SESSION_REPLAY)) {
+                    this.#add_cly_events({ key: internalEventKeyEnums.RECORDING_START, count: 1, segmentation: segmentation }, undefined, timestamp);
+                }
+            },
+            enableStudyInteractions: this.#enableStudyInteractions,
+            info: () => ({ url: this.url, app_key: this.app_key, device_id: this.device_id, sdk_name: this.#sdkName, sdk_version: this.#sdkVersion, app_version: this.app_version, isTemporaryId: this.#deviceIdType === DeviceIdTypeInternalEnums.TEMPORARY_ID })
+        }
     };
 
     /**
