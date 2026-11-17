@@ -140,6 +140,10 @@ function createWireRecorder(options) {
             var inBand = rect.bottom >= top && rect.top <= bottom && rect.width > 0 && rect.height > 0;
             var kind = blocked ? KIND.BLOCKED : kindOf(el);
             var text = kind === KIND.FIELD || blocked ? "" : ownText(el);
+            // an input button's label is its value, which the page sets, not the user
+            if (kind === KIND.BUTTON && el.tagName === "INPUT" && !text) {
+                text = String(el.value || "").replace(/\s+/g, " ").trim().slice(0, MAX_TEXT);
+            }
             var hasPaint = !TRANSPARENT.test(style.backgroundColor) || style.borderTopWidth !== "0px" || style.boxShadow !== "none" || style.backgroundImage !== "none";
             var significant = inBand && (kind !== KIND.SURFACE || hasPaint || text);
             var id = parentId;
