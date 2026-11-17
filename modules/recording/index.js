@@ -13,6 +13,7 @@
 import { createWireRecorder } from "./wire.js";
 import { createCapture } from "./capture.js";
 import { createOutbox } from "./outbox.js";
+import { createBufferMirror } from "./buffer-mirror.js";
 
 var VERSION = "0.1.0";
 var DEFAULTS = {
@@ -134,6 +135,7 @@ function createRecordingModule(Countly) {
     var lastRid = null;
     var bufferWanted = false;
     var stopped = false;
+    var mirror = createBufferMirror({ clock: clock });
     var outbox = createOutbox({
         clock: clock,
         log: log,
@@ -267,11 +269,13 @@ function createRecordingModule(Countly) {
     function onChunk(chunk) {
         var s = settings();
         if (bufferWanted) {
+            var tab = streamId();
             buffer.push(chunk);
+            mirror.put(tab, chunk);
             var from = chunk.t1 - s.window * 1000;
             // keep the chunk that reaches back past the window start whole
             while (buffer.length > 1 && buffer[1].t0 <= from) {
-                buffer.shift();
+                mirror.remove(tab, buffer.shift());
             }
         }
         openTriggered.forEach(function(rec) {
@@ -340,6 +344,9 @@ function createRecordingModule(Countly) {
             bridge.setStream(streamId());
             capture.start();
             log("debug", "capture started with " + recorder.format + (study ? " for study " + study.id : ""));
+            if (bufferWanted) {
+                restoreBuffer(s);
+            }
         }
         if (study && !studyRecording) {
             startStudyRecording();
@@ -352,6 +359,24 @@ function createRecordingModule(Countly) {
                 watchNavigation();
             }
         }
+    }
+
+    /**
+     * Put back the chunks the tab's previous pages left in the window, ahead of this page's.
+     * @param {Object} s - settings
+     */
+    function restoreBuffer(s) {
+        var format = recorder.format;
+        mirror.load(streamId(), clock() - s.window * 1000, format).then(function(previous) {
+            if (!capture || !bufferWanted || recorder.format !== format || !previous.length) {
+                return;
+            }
+            var firstHere = buffer.length ? buffer[0].t0 : Infinity;
+            buffer = previous.filter(function(chunk) {
+                return chunk.t1 <= firstHere;
+            }).concat(buffer);
+            log("debug", "buffer restored " + previous.length + " chunk(s) from earlier pages of this tab");
+        });
     }
 
     /** Start a study recording (at load, and again after one ends at its maximum duration). */
@@ -392,6 +417,7 @@ function createRecordingModule(Countly) {
             capture = null;
         }
         buffer = [];
+        mirror.clear(streamId());
         bridge.setStream(null);
     }
 
@@ -529,7 +555,8 @@ function createRecordingModule(Countly) {
     window.addEventListener("pagehide", function() {
         // the tab is going away: end what is open and send what fits a keepalive request
         openTriggered.slice().forEach(finishTriggered);
-        if (studyRecording && capture) {
+        // seal the page's last seconds: the study sends them, the buffer mirror keeps them for the next page
+        if ((studyRecording || bufferWanted) && capture) {
             capture.seal();
         }
         setTimeout(outbox.flushOnHide, 0);

@@ -46,6 +46,8 @@ function createCapture(options) {
             current.t0 = Math.min(current.t0, t);
             current.frames.push(frame);
             current.t1 = Math.max(current.t1, t);
+            // every chunk carries its own address, so playback from any chunk shows it
+            lastLocation = null;
             noteLocation();
         },
         delta: function(t, frame) {
@@ -142,6 +144,9 @@ function createCapture(options) {
             listen(document, "touchmove", pointer(4));
             listen(document, "touchend", pointer(5));
             listen(document, "keydown", activity);
+            // the address as soon as it changes; history.pushState is caught by the timer below
+            listen(window, "hashchange", noteLocation);
+            listen(window, "popstate", noteLocation);
             listen(window, "scroll", function() {
                 activity();
                 var t = clock();

@@ -3,33 +3,11 @@
 // events. Jobs are mirrored to IndexedDB, so chunks a closed tab could not send go up on
 // the next page load of the site.
 
-var DB_NAME = "countly_recordings";
-var STORE = "outbox";
+import { openDb, STORES } from "./db.js";
+
+var STORE = STORES.OUTBOX;
 var KEEPALIVE_LIMIT = 60 * 1024;
 var MAX_JOBS = 400;
-
-/**
- * @returns {Promise<IDBDatabase|null>} the outbox database, or null where IndexedDB is unavailable
- */
-function openDb() {
-    return new Promise(function(resolve) {
-        try {
-            var req = indexedDB.open(DB_NAME, 1);
-            req.onupgradeneeded = function() {
-                req.result.createObjectStore(STORE, { keyPath: "id" });
-            };
-            req.onsuccess = function() {
-                resolve(req.result);
-            };
-            req.onerror = function() {
-                resolve(null);
-            };
-        }
-        catch (e) {
-            resolve(null);
-        }
-    });
-}
 
 /**
  * @param {Object} options - {endpoint(), log(level, message), clock}
@@ -39,7 +17,7 @@ function createOutbox(options) {
     var jobs = [];
     var busy = false;
     var retryTimer = null;
-    var dbPromise = typeof indexedDB !== "undefined" ? openDb() : Promise.resolve(null);
+    var dbPromise = openDb();
     var restored = false;
 
     /**
