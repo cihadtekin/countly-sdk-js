@@ -102,6 +102,9 @@ function matchesScope(pattern, path) {
     return re.test(path);
 }
 
+// chunks a closing page could not compress, as `<prefix><rid>:<seq>` (see keepForNextPage)
+var CLOSING_PREFIX = "cly_rec_closing:";
+
 /**
  * gzip a chunk's JSON with the browser's CompressionStream.
  * @param {Object} chunk - envelope
@@ -132,6 +135,10 @@ function createRecordingModule(Countly) {
     var openTriggered = [];
     var study = null;
     var studyRecording = null;
+    // set while the page closes or recording stops: the study recording's chunk sealed then is its last
+    var ending = false;
+    // set while the page closes: there is no time left to compress, so chunks wait in localStorage
+    var leaving = false;
     var lastRid = null;
     var bufferWanted = false;
     var stopped = false;
@@ -257,12 +264,65 @@ function createRecordingModule(Countly) {
             v: 1, rid: rec.rid, stream: rec.stream, seq: seq, format: chunk.format, recorder: chunk.recorder,
             t0: chunk.t0, t1: chunk.t1, keyframe: true, screen: chunk.screen, overlay: chunk.overlay, data: chunk.data
         };
-        var m = meta(rec);
+        var job = { rid: rec.rid, stream: rec.stream, seq: seq, final: final, ct0: chunk.t0, ct1: chunk.t1, meta: meta(rec) };
+        if (leaving) {
+            keepForNextPage(job, envelope);
+            return;
+        }
+        queue(job, envelope);
+    }
+
+    /**
+     * Compress the chunk and hand it to the outbox.
+     * @param {Object} job - upload job without its blob
+     * @param {Object} envelope - the chunk
+     */
+    function queue(job, envelope) {
         gzip(envelope).then(function(blob) {
-            outbox.add({ rid: rec.rid, stream: rec.stream, seq: seq, final: final, ct0: chunk.t0, ct1: chunk.t1, meta: m, blob: blob });
+            job.blob = blob;
+            outbox.add(job);
         }).catch(function(e) {
             log("error", "could not compress a chunk: " + e);
         });
+    }
+
+    /**
+     * The page is closing: compression would not finish before it is gone (it runs in tasks
+     * the closed page never gets), so keep the chunk as it is; the next page load sends it.
+     * @param {Object} job - upload job without its blob
+     * @param {Object} envelope - the chunk
+     */
+    function keepForNextPage(job, envelope) {
+        try {
+            window.localStorage.setItem(CLOSING_PREFIX + job.rid + ":" + job.seq, JSON.stringify({ job: job, envelope: envelope }));
+        }
+        catch (e) {
+            log("warning", "could not keep chunk " + job.seq + " of " + job.rid + " for the next page: " + e);
+        }
+    }
+
+    /** Send the chunks an earlier page kept while it closed. */
+    function sendKeptChunks() {
+        var kept = [];
+        try {
+            for (var i = 0; i < window.localStorage.length; i++) {
+                var key = window.localStorage.key(i);
+                if (key && key.indexOf(CLOSING_PREFIX) === 0) {
+                    kept.push(key);
+                }
+            }
+            kept.forEach(function(key) {
+                var item = JSON.parse(window.localStorage.getItem(key));
+                window.localStorage.removeItem(key);
+                queue(item.job, item.envelope);
+            });
+        }
+        catch (e) {
+            log("warning", "could not send the chunks kept by an earlier page: " + e);
+        }
+        if (kept.length) {
+            log("debug", "sending " + kept.length + " chunk(s) kept by an earlier page");
+        }
     }
 
     /**
@@ -287,7 +347,7 @@ function createRecordingModule(Countly) {
         });
         if (studyRecording) {
             var rec = studyRecording;
-            var ended = endOfStudyRecording(rec, chunk);
+            var ended = ending ? "closed" : endOfStudyRecording(rec, chunk);
             send(rec, chunk, !!ended);
             if (ended) {
                 log("debug", "study recording " + rec.rid + " ended: " + ended);
@@ -560,16 +620,30 @@ function createRecordingModule(Countly) {
     });
 
     window.addEventListener("pagehide", function() {
-        // the tab is going away: end what is open and send what fits a keepalive request
+        // the tab is going away: end what is open, keep what is not compressed yet for the
+        // next page load, and send what is ready in keepalive requests
+        leaving = true;
         openTriggered.slice().forEach(finishTriggered);
-        // seal the page's last seconds: the study sends them, the buffer mirror keeps them for the next page
+        // seal the page's last seconds: the study ends with them, the buffer mirror keeps them for the next page
         if ((studyRecording || bufferWanted) && capture) {
+            ending = true;
             capture.seal();
+            ending = false;
         }
-        setTimeout(outbox.flushOnHide, 0);
+        leaving = false;
+        outbox.flushOnHide();
+    });
+
+    window.addEventListener("pageshow", function(e) {
+        // back from the back/forward cache: send what the page kept, and follow the ended study recording with a new one
+        if (e.persisted) {
+            sendKeptChunks();
+            ensureCapture();
+        }
     });
 
     outbox.restore();
+    sendKeptChunks();
     ensureCapture();
 
     return {
@@ -592,7 +666,9 @@ function createRecordingModule(Countly) {
             stopped = true;
             openTriggered.slice().forEach(finishTriggered);
             if (studyRecording && capture) {
+                ending = true;
                 capture.seal();
+                ending = false;
             }
             studyRecording = null;
             stopCapture();
