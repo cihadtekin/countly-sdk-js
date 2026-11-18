@@ -156,8 +156,12 @@ function createRecordingModule(Countly) {
                 s[SERVER_KEYS[key]] = server[key];
             }
         });
-        if (server.rec_tc) {
-            s.triggers.crash = server.rec_tc;
+        // crash triggers: one switch each for unhandled (rec_tcf) and handled (rec_tcn) errors
+        if (typeof server.rec_tcf === "boolean" || typeof server.rec_tcn === "boolean") {
+            s.triggers.crash = {
+                fatal: typeof server.rec_tcf === "boolean" ? server.rec_tcf : s.triggers.crash.fatal,
+                nonfatal: typeof server.rec_tcn === "boolean" ? server.rec_tcn : s.triggers.crash.nonfatal
+            };
         }
         if (server.rec_te) {
             s.triggers.events = server.rec_te;
