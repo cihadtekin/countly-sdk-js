@@ -443,6 +443,9 @@ function createRecordingModule(Countly) {
             return null;
         }
         dailyCount(1);
+        // The buffer holds sealed chunks only: seal the one in progress, or a trigger soon
+        // after a seal (or before the first) would lose the seconds just before it.
+        capture.seal();
         var now = clock();
         var chunks = buffer.slice();
         var t0 = chunks.length ? chunks[0].t0 : now;
