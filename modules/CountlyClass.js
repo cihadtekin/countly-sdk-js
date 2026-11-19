@@ -1,4 +1,4 @@
-import { actionTarget, createClickOutcomeWatcher, createRageDetector, describeElement, isIgnored } from "./Interactions.js";
+import { actionTarget, createClickOutcomeWatcher, createRageDetector, describeElement, describeField, isIgnored } from "./Interactions.js";
 import { DeviceIdTypeInternalEnums, SDK_NAME, SDK_VERSION, configurationDefaultValues, contentReservedSegmentationKeys, contentReservedSegmentationPrefix, featureEnums, featureList, healthCheckCounterEnum, internalEventKeyEnums, internalEventKeyEnumsArray, logGatheringDefaultValues, logLevelEnums, logLevelToListenerName, logLevelToWireChar, logLineConsent, pushConstants, pushMessageTypes, pushStorageKeys, pushWorkerParams, tabHandoverTimes, urlParseRE } from "./Constants.js";
 import { runConnectionTest, probeViaFetch, capReport } from "./ConnectionTest.js";
 import {
@@ -4901,8 +4901,9 @@ class CountlyClass {
      * @param {string} type - click, rage_click, dead_click, error_click, input or submit
      * @param {Element} target - the element
      * @param {Event|null} event - the pointer event, when there is one
+     * @param {Object} [extra] - more segments: a field's form and type (input, submit)
      */
-    #recordInteraction = (type, target, event) => {
+    #recordInteraction = (type, target, event, extra) => {
         var segments = {
             type: type,
             width: getDocWidth(),
@@ -4931,6 +4932,9 @@ class CountlyClass {
             for (var key in described) {
                 segments[key] = described[key];
             }
+        }
+        for (var extraKey in extra || {}) {
+            segments[extraKey] = extra[extraKey];
         }
         segments = truncateObject(segments, this.#SCLimitKeyLength, this.#SCLimitValueSize, this.#SCLimitSegmentationValues, "recordInteraction", this.#log);
         if (this.track_domains) {
@@ -4994,7 +4998,7 @@ class CountlyClass {
             if (!target || isIgnored(target)) {
                 return;
             }
-            this.#recordInteraction(type, target, null);
+            this.#recordInteraction(type, target, null, describeField(target));
         };
         // capture phase: a page that stops propagation still has its fields counted
         parent.addEventListener("change", record("input"), true);

@@ -8,7 +8,7 @@
 * Added `remove_different_app_keys_from_queue` to drop queued requests with another app key.
 * Added `log_listener` init option, a function that receives every log message of the SDK and its level ("error", "warning", "info", "debug" or "verbose"), also while `debug` is off. It is called inside the SDK's own calls, so it should return quickly and must not call the SDK.
 * Added `session_replay` consent feature for Session Replay. It always needs an explicit `add_consent("session_replay")`, also when `require_consent` is off.
-* Added `track_inputs`, which records the fields users change and the forms they submit, never their values, as `[CLY]_action` `input` and `submit` events (needs the `forms` consent).
+* Added `track_inputs`, which records the fields users change and the forms they submit, never their values, as `[CLY]_action` `input` and `submit` events with the field's form (`form`) and type (`itype`) (needs the `forms` consent).
 * Added rage, dead and error clicks to `track_clicks`, recorded as `[CLY]_action` `rage_click`, `dead_click` and `error_click`. Each is on by default and can be turned off with `track_clicks({ rage: false })` (or `track_clicks(parent, options)`). Apps that already call `track_clicks` send these new event types after updating.
 * Added the clicked element (`sel`, `tag`, the visible label `txt` unless masked with `cly-mask`), the viewport size (`vw`, `vh`) and the scroll position (`sx`, `sy`) to `[CLY]_action` clicks. Elements inside `cly-ignore` are not tracked.
 * Added `scroll_stop` to `track_scrolls`: a `[CLY]_action` when scrolling settles after moving at least a quarter of the viewport.

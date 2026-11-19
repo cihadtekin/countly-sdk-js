@@ -45,8 +45,10 @@ function selectorOf(el) {
             parts.unshift("[data-cly=\"" + node.getAttribute("data-cly") + "\"]");
             break;
         }
-        if (node.id && !/\d{3,}/.test(node.id)) {
-            parts.unshift(tag + "#" + node.id);
+        // the attribute, not `node.id`: a form with a field named "id" answers `form.id` with that field
+        var id = node.getAttribute("id");
+        if (id && !/\d{3,}/.test(id)) {
+            parts.unshift(tag + "#" + id);
             break;
         }
         var classes = (typeof node.className === "string" ? node.className : "").split(/\s+/).filter(function(c) {
@@ -147,6 +149,31 @@ function describeElement(el, options) {
 }
 
 /**
+ * The form a field belongs to and the kind of field, never its value. `form` is the form's
+ * selector, the same one a submit of that form carries as `sel`, so a form's fields and its
+ * submits group together; a field outside any form has none. `itype` is the field's type
+ * (`text`, `email`, `checkbox`, `select-one`, `textarea`…).
+ * @param {Element} el - the changed field, or the submitted form
+ * @returns {Object} form and itype, each only when known
+ */
+function describeField(el) {
+    var out = {};
+    if (!el || el.nodeType !== 1) {
+        return out;
+    }
+    var isForm = el.tagName.toLowerCase() === "form";
+    // `el.form` also finds a form the field joins with a form="id" attribute from outside it
+    var form = isForm ? el : (el.form && el.form.nodeType === 1 ? el.form : (el.closest ? el.closest("form") : null));
+    if (form) {
+        out.form = selectorOf(form);
+    }
+    if (!isForm && typeof el.type === "string" && el.type) {
+        out.itype = el.type.toLowerCase();
+    }
+    return out;
+}
+
+/**
  * Rage clicks: three or more clicks within a second and 30 px of each other.
  * One rage click is reported per burst.
  * @returns {function} (time, x, y) => true when this click makes the burst a rage click
@@ -224,4 +251,4 @@ function createClickOutcomeWatcher(report) {
     };
 }
 
-export { isIgnored, selectorOf, labelOf, actionTarget, isInteractiveLooking, describeElement, createRageDetector, createClickOutcomeWatcher };
+export { isIgnored, selectorOf, labelOf, actionTarget, isInteractiveLooking, describeElement, describeField, createRageDetector, createClickOutcomeWatcher };

@@ -89,16 +89,51 @@ describe("Interactions: frustration signals, inputs and scroll stops", () => {
         cy.wait(800);
         actions().then((list) => {
             var inputs = ofType(list, "input");
-            expect(inputs.map((a) => a.sel)).to.deep.equal(["input#name", "input#secret"]);
+            expect(inputs.map((a) => [a.sel, a.form, a.itype])).to.deep.equal([
+                ["input#name", "form#signup", "text"],
+                ["input#secret", "form#signup", "password"],
+            ]);
             inputs.forEach((a) => {
                 expect(a.tag).to.equal("input");
             });
+            // the form's selector, though a field named "id" shadows the form's id property
             var submit = ofType(list, "submit");
             expect(submit).to.have.length(1);
-            expect(submit[0]).to.include({ sel: "form#signup", tag: "form" });
+            expect(submit[0]).to.include({ sel: "form#signup", tag: "form", form: "form#signup" });
+            expect(submit[0]).not.to.have.property("itype");
             // nothing typed leaves the page
             expect(JSON.stringify(list)).not.to.contain("Ada Lovelace");
             expect(JSON.stringify(list)).not.to.contain("hunter2");
+        });
+    });
+
+    it("a field names its form and its type, also from outside the form, and a field in no form names none", () => {
+        openPage();
+        cy.get("#nickname").type("Ada").blur();
+        cy.get("#email").type("ada@example.com").blur();
+        cy.get("#plan").select("pro");
+        cy.get("#terms").check();
+        cy.get("#note").type("Hello").blur();
+        cy.get("#search").type("pricing").blur();
+        cy.get("form.newsletter").submit();
+        cy.wait(800);
+        actions().then((list) => {
+            var inputs = ofType(list, "input");
+            expect(inputs.map((a) => [a.sel, a.form, a.itype])).to.deep.equal([
+                ["input#nickname", "form#signup", "text"],
+                ["input#email", "body > form.newsletter", "email"],
+                ["select#plan", "body > form.newsletter", "select-one"],
+                ["input#terms", "body > form.newsletter", "checkbox"],
+                ["textarea#note", "body > form.newsletter", "textarea"],
+                ["input#search", undefined, "search"],
+            ]);
+            expect(inputs[5]).not.to.have.property("form");
+            // a form without an id is named the way any element is (up to three levels)
+            var submit = ofType(list, "submit");
+            expect(submit).to.have.length(1);
+            expect(submit[0]).to.include({ sel: "body > form.newsletter", form: "body > form.newsletter" });
+            expect(JSON.stringify(list)).not.to.contain("ada@example.com");
+            expect(JSON.stringify(list)).not.to.contain("pricing");
         });
     });
 
