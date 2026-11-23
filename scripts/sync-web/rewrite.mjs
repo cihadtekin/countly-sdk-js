@@ -84,16 +84,18 @@ export function toWebTest(text, folder) {
 
 /**
  * A fixture page as countly-sdk-web serves it: the SDK as a classic script before the page's module script, which then
- * uses the global Countly instead of importing the SDK's sources.
+ * uses the global Countly instead of importing the SDK's sources. The recording module it imports is
+ * lib/countly_recording.js there, a classic script that runs the same when a module script imports it.
  * @param {string} html - the fixture of this repository
  * @returns {string} the fixture for countly-sdk-web
  */
 export function toWebFixture(html) {
+    const page = html.replace(/(["'])\.\.\/\.\.\/modules\/recording\/index\.js\1/g, "$1../../lib/countly_recording.js$1");
     const importLine = /^[ \t]*import Countly from (["'])\.\.\/\.\.\/Countly\.js\1;[ \t]*\r?\n/m;
-    if (!importLine.test(html)) {
-        return html;
+    if (!importLine.test(page)) {
+        return page;
     }
-    return html.replace(importLine, "").replace(/^([ \t]*)<script type=(["'])module\2>/m, "$1<script type='text/javascript' src='../../lib/countly.js'></script>\n$1<script type=$2module$2>");
+    return page.replace(importLine, "").replace(/^([ \t]*)<script type=(["'])module\2>/m, "$1<script type='text/javascript' src='../../lib/countly.js'></script>\n$1<script type=$2module$2>");
 }
 
 /**

@@ -1,5 +1,5 @@
 // Brings countly-sdk-web up to date with this repository: builds the SDK and writes the web repository's bundle,
-// minified bundle, service worker, TypeScript definitions, public API file and request scenario files with the scripts
+// minified bundle, Session Replay recording module (bundle and minified), service worker, TypeScript definitions, public API file and request scenario files with the scripts
 // that check them, quick async loader, Cypress tests, the newer CHANGELOG sections and the version.
 // The service worker of the release the web repository last committed is kept here as a test fixture.
 // Nothing is committed: review and commit the changes in the web repository. Examples that differ are only listed.
@@ -265,6 +265,10 @@ files(join(root, "api", "requests")).filter((name) => name.endsWith(".json")).fo
 write(join(web, "test", "consumers", "helpers", "request-scenarios.mjs"), read(join(root, "scripts", "request-scenarios.mjs")));
 checkBundle(join(web, "lib", "countly.js"), sdkVersion);
 checkBundle(join(web, "lib", "countly.min.js"), sdkVersion);
+
+// the Session Replay recording module, a script of its own loaded after the SDK
+write(join(web, "lib", "countly_recording.js"), toWebBundle(read(join(root, "dist", "countly_recording.js")), read(join(root, "scripts", "sync-web", "recording-banner.txt"))));
+console.log("sync:web, lib/countly_recording.min.js: " + minify(opts.closure, web, "lib/countly_recording.js", "lib/countly_recording.min.js"));
 
 console.log("sync:web, " + LOADER_MIN.split("\\").join("/") + ": " + minify(opts.closure, root, LOADER.split("\\").join("/"), LOADER_MIN.split("\\").join("/")));
 copyFileSync(join(root, LOADER), join(web, LOADER));

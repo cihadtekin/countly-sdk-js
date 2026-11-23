@@ -1,0 +1,5 @@
+/** **********
+* Countly Web SDK, Session Replay recording module
+* https://github.com/Countly/countly-sdk-web
+* Load it after countly.js and before Countly.init, so the page's first requests carry its recording stream.
+*********** */

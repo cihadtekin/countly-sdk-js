@@ -36,6 +36,11 @@ test("a fixture loads the bundle as a classic script before its module script", 
     assert.equal(toWebFixture("<html><body>no SDK</body></html>"), "<html><body>no SDK</body></html>");
 });
 
+test("a fixture imports the recording module as countly-sdk-web ships it", () => {
+    const fixture = "<script type='module'>\n  import Countly from '../../Countly.js';\n  await import('../../modules/recording/index.js');\n  Countly.init({});\n</script>\n";
+    assert.equal(toWebFixture(fixture), "<script type='text/javascript' src='../../lib/countly.js'></script>\n<script type='module'>\n  await import('../../lib/countly_recording.js');\n  Countly.init({});\n</script>\n");
+});
+
 test("a test worker becomes a classic worker that loads the bundle", () => {
     assert.equal(toWebWorker("import Countly from \"../Countly.js\";\n\nCountly.init({});\n"), "importScripts(\"../lib/countly.js\");\n\nCountly.init({});\n");
 });
