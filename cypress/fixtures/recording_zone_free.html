@@ -1,0 +1,74 @@
+<!-- Used in recording tests: the Session Replay recording module on a page with a stand-in for zone.js (as Angular
+     loads it). The stand-in keeps the browser's own timer, listener and MutationObserver functions under the names
+     Zone.__symbol__ gives and counts the calls that reach the patched ones and the originals. -->
+<html>
+<head>
+  <script>
+    window.zoned = { timers: 0, listeners: [], observers: 0 };
+    window.zoneFree = { timers: 0, listeners: [], observers: 0 };
+    var nativeSetTimeout = window.setTimeout;
+    var nativeSetInterval = window.setInterval;
+    var nativeAddEventListener = EventTarget.prototype.addEventListener;
+    var NativeMutationObserver = window.MutationObserver;
+    window.Zone = { __symbol__: function (name) { return "__zone_symbol__" + name; } };
+    window.__zone_symbol__setTimeout = function () {
+      window.zoneFree.timers++;
+      return nativeSetTimeout.apply(window, arguments);
+    };
+    window.__zone_symbol__setInterval = function () {
+      window.zoneFree.timers++;
+      return nativeSetInterval.apply(window, arguments);
+    };
+    window.setTimeout = function () {
+      window.zoned.timers++;
+      return nativeSetTimeout.apply(window, arguments);
+    };
+    window.setInterval = function () {
+      window.zoned.timers++;
+      return nativeSetInterval.apply(window, arguments);
+    };
+    EventTarget.prototype.__zone_symbol__addEventListener = function (type) {
+      window.zoneFree.listeners.push(type);
+      return nativeAddEventListener.apply(this, arguments);
+    };
+    EventTarget.prototype.addEventListener = function (type) {
+      window.zoned.listeners.push(type);
+      return nativeAddEventListener.apply(this, arguments);
+    };
+    window.__zone_symbol__MutationObserver = function (callback) {
+      window.zoneFree.observers++;
+      return new NativeMutationObserver(callback);
+    };
+    window.MutationObserver = function (callback) {
+      window.zoned.observers++;
+      return new NativeMutationObserver(callback);
+    };
+  </script>
+  <script type='module'>
+    import Countly from '../../Countly.js';
+
+    window.localStorage.clear();
+    window.sessionStorage.clear();
+    await new Promise((resolve) => {
+      var req = indexedDB.deleteDatabase("countly_recordings");
+      req.onsuccess = req.onerror = req.onblocked = resolve;
+    });
+    window.zoned.listeners.length = 0;
+    window.Countly = Countly;
+    await import('../../modules/recording/index.js');
+    Countly.init({
+      app_key: "YOUR_APP_KEY",
+      url: "https://your.domain.count.ly",
+      device_id: "recording-tester",
+      test_mode: true,
+      recording: { keyframeInterval: 1 }
+    });
+    Countly.add_consent(["session_replay"]);
+    Countly.track_pageview("landing");
+  </script>
+</head>
+<body>
+  <h1>Recording, zone.js</h1>
+  <p id="text">text</p>
+</body>
+</html>

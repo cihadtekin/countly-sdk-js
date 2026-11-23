@@ -15,6 +15,7 @@ import { createWireRecorder } from "./wire.js";
 import { createCapture } from "./capture.js";
 import { createOutbox } from "./outbox.js";
 import { createBufferMirror } from "./buffer-mirror.js";
+import * as zoneFree from "./zone-free.js";
 
 var VERSION = "0.1.0";
 // how long a page waits for its server settings before deciding that nothing records (see syncStream)
@@ -149,7 +150,7 @@ function createRecordingModule(Countly) {
     // whenever consent allows, also before anything records: the page's first view leaves before
     // them, and a recording they start must still find it
     var awaitingSettings = true;
-    var settingsTimer = setTimeout(settingsArrived, SETTINGS_WAIT_MS);
+    var settingsTimer = zoneFree.setTimer(settingsArrived, SETTINGS_WAIT_MS);
     var mirror = createBufferMirror({ clock: clock });
     var outbox = createOutbox({
         clock: clock,
@@ -398,7 +399,7 @@ function createRecordingModule(Countly) {
     function settingsArrived() {
         if (awaitingSettings) {
             awaitingSettings = false;
-            clearTimeout(settingsTimer);
+            zoneFree.clearTimer(settingsTimer);
             syncStream();
         }
     }
@@ -499,12 +500,12 @@ function createRecordingModule(Countly) {
             var original = window.history[name];
             window.history[name] = function() {
                 var result = original.apply(this, arguments);
-                setTimeout(check, 0);
+                zoneFree.setTimer(check, 0);
                 return result;
             };
         });
-        window.addEventListener("popstate", check);
-        window.addEventListener("hashchange", check);
+        zoneFree.listen(window, "popstate", check);
+        zoneFree.listen(window, "hashchange", check);
     }
 
     function stopCapture() {
@@ -552,7 +553,7 @@ function createRecordingModule(Countly) {
         bridge.recordStart({ rid: rec.rid, kind: "triggered", trigger: type, trigger_key: rec.trigger.key, fmt: recorder.format, rec_v: recorder.name + "@" + recorder.version }, t0);
         openTriggered.push(rec);
         var seconds = Math.min(typeof after === "number" ? after : s.after, s.maxDuration);
-        rec.timer = setTimeout(function() {
+        rec.timer = zoneFree.setTimer(function() {
             finishTriggered(rec);
         }, seconds * 1000);
         log("debug", "triggered recording " + rec.rid + " (" + type + (key ? " " + key : "") + ")");
@@ -564,7 +565,7 @@ function createRecordingModule(Countly) {
      * @param {Object} rec - recording
      */
     function finishTriggered(rec) {
-        clearTimeout(rec.timer);
+        zoneFree.clearTimer(rec.timer);
         if (capture) {
             capture.seal();
         }
@@ -639,7 +640,7 @@ function createRecordingModule(Countly) {
             else {
                 // consent withdrawn: drop what is buffered and stop; stored recordings stay (PLAN.md 13.2)
                 openTriggered.forEach(function(rec) {
-                    clearTimeout(rec.timer);
+                    zoneFree.clearTimer(rec.timer);
                 });
                 openTriggered = [];
                 studyRecording = null;
@@ -652,7 +653,7 @@ function createRecordingModule(Countly) {
         }
     });
 
-    window.addEventListener("pagehide", function() {
+    zoneFree.listen(window, "pagehide", function() {
         // the tab is going away: end what is open, keep what is not compressed yet for the
         // next page load, and send what is ready in keepalive requests
         leaving = true;
@@ -667,7 +668,7 @@ function createRecordingModule(Countly) {
         outbox.flushOnHide();
     });
 
-    window.addEventListener("pageshow", function(e) {
+    zoneFree.listen(window, "pageshow", function(e) {
         // back from the back/forward cache: send what the page kept, and follow the ended study recording with a new one
         if (e.persisted) {
             sendKeptChunks();
@@ -769,24 +770,29 @@ function attachTo(Countly, instance) {
     });
 }
 
-var waitingForInit = false;
+// the global Countly object the init hook was left on: a page that puts another one there gets the hook too
+var waitingOn = null;
 
 /**
  * Attach to the SDK. Loaded after init, at once. Loaded before it, during init
  * (`Countly._onInit`), before the page's first requests are made, so they carry the tab's
- * stream. Until the SDK is there, and as a fallback, it looks again every 200 ms.
+ * stream. As a fallback, it looks again every 200 ms.
+ *
+ * Loaded before the SDK (or before the loader, countly-sdk-web/loader), it makes the global
+ * Countly object itself: the SDK and the loader take over the one they find, so the hook
+ * left on it runs at init.
  */
 function attach() {
-    var Countly = window.Countly;
-    if (Countly && Countly._internals && Countly._internals.recording && Countly.app_key) {
+    var Countly = window.Countly = window.Countly || {};
+    if (Countly._internals && Countly._internals.recording && Countly.app_key) {
         attachTo(Countly, Countly);
         return;
     }
-    if (Countly && Countly.recording && Countly.recording.version) {
+    if (Countly.recording && Countly.recording.version) {
         return;
     }
-    if (Countly && !waitingForInit) {
-        waitingForInit = true;
+    if (waitingOn !== Countly) {
+        waitingOn = Countly;
         Countly._onInit = Countly._onInit || [];
         Countly._onInit.push(function(instance) {
             if (instance._internals && instance._internals.recording) {
@@ -794,7 +800,7 @@ function attach() {
             }
         });
     }
-    setTimeout(attach, 200);
+    zoneFree.setTimer(attach, 200);
 }
 
 if (typeof window !== "undefined") {

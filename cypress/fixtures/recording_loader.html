@@ -1,0 +1,32 @@
+<!-- Used in recording tests: the recording module on a page that uses the loader (countly-sdk-web/loader), which
+     loads the SDK only at init. The module comes first, before any global Countly object exists; the loader and then
+     the SDK take over the one it makes. The calls made before init (the consent, the page's view) run once the SDK has
+     loaded. The import map resolves countly-sdk-web to the SDK, as a bundler resolves the package. -->
+<html>
+<head>
+  <script type="importmap">{ "imports": { "countly-sdk-web": "../../Countly.js" } }</script>
+  <script type='module'>
+    window.localStorage.clear();
+    window.sessionStorage.clear();
+    await new Promise((resolve) => {
+      var req = indexedDB.deleteDatabase("countly_recordings");
+      req.onsuccess = req.onerror = req.onblocked = resolve;
+    });
+    await import('../../modules/recording/index.js');
+    const { default: Countly } = await import('../../loader.js');
+    window.sameObject = Countly === window.Countly;
+    Countly.add_consent(["session_replay"]);
+    Countly.track_pageview("landing");
+    Countly.init({
+      app_key: "YOUR_APP_KEY",
+      url: "https://your.domain.count.ly",
+      device_id: "recording-tester",
+      test_mode: true,
+      recording: { keyframeInterval: 2 }
+    });
+  </script>
+</head>
+<body>
+  <h1>Recording, loader</h1>
+</body>
+</html>

@@ -2,6 +2,8 @@
 // keyframe, so it can be replayed on its own. The recorder adapter serializes the screen;
 // this file owns the chunk timer and the format-independent overlay tracks.
 
+import * as zoneFree from "./zone-free.js";
+
 var POINTER_INTERVAL = 50;
 var SCROLL_INTERVAL = 100;
 
@@ -104,7 +106,7 @@ function createCapture(options) {
      * @param {function} fn - listener
      */
     function listen(target, type, fn) {
-        target.addEventListener(type, fn, { capture: true, passive: true });
+        zoneFree.listen(target, type, fn, { capture: true, passive: true });
         listeners.push([target, type, fn]);
     }
 
@@ -170,7 +172,7 @@ function createCapture(options) {
             if (current) {
                 current.overlay.scroll.push([clock(), Math.round(window.scrollX || 0), Math.round(window.scrollY || 0)]);
             }
-            timer = setInterval(function() {
+            timer = zoneFree.setRepeat(function() {
                 noteLocation();
                 // a hidden tab draws nothing new: no empty chunks every few seconds
                 if (document.visibilityState !== "hidden") {
@@ -185,10 +187,10 @@ function createCapture(options) {
             }
             finish();
             running = false;
-            clearInterval(timer);
+            zoneFree.clearRepeat(timer);
             recorder.stop();
             listeners.forEach(function(l) {
-                l[0].removeEventListener(l[1], l[2], true);
+                zoneFree.unlisten(l[0], l[1], l[2], true);
             });
             listeners = [];
             current = null;

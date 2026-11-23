@@ -12,6 +12,8 @@
 //     flags: 1 fixed, 2 text masked, 4 field (value never recorded), 8 checked
 // The format's renderer is in the Countly dashboard (session-replays plugin).
 
+import * as zoneFree from "./zone-free.js";
+
 var VERSION = "0.1.0";
 var MAX_NODES = 1500;
 var MAX_TEXT = 300;
@@ -255,7 +257,7 @@ function createWireRecorder(options) {
         if (pending || !running) {
             return;
         }
-        pending = setTimeout(function() {
+        pending = zoneFree.setTimer(function() {
             pending = null;
             capture(false);
         }, 200);
@@ -267,7 +269,7 @@ function createWireRecorder(options) {
      * @param {function} fn - listener
      */
     function listen(target, type, fn) {
-        target.addEventListener(type, fn, true);
+        zoneFree.listen(target, type, fn, true);
         listeners.push([target, type, fn]);
     }
 
@@ -284,8 +286,9 @@ function createWireRecorder(options) {
             sink = frameSink;
             running = true;
             previous = new Map();
-            if (typeof MutationObserver !== "undefined") {
-                observer = new MutationObserver(schedule);
+            var Observer = zoneFree.mutationObserver();
+            if (Observer) {
+                observer = new Observer(schedule);
                 observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
             }
             listen(window, "scroll", schedule);
@@ -307,10 +310,10 @@ function createWireRecorder(options) {
                 observer.disconnect();
                 observer = null;
             }
-            clearTimeout(pending);
+            zoneFree.clearTimer(pending);
             pending = null;
             listeners.forEach(function(l) {
-                l[0].removeEventListener(l[1], l[2], true);
+                zoneFree.unlisten(l[0], l[1], l[2], true);
             });
             listeners = [];
         },

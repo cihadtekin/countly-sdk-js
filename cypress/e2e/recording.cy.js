@@ -390,4 +390,53 @@ describe("Session Replay recording", () => {
             cy.wrap(uploads).should("have.length", 0);
         });
     });
+
+    describe("on other pages", () => {
+        it("on a page with zone.js, keeps its timers, listeners and DOM observer out of the zone, and records", () => {
+            var uploads = acceptUploads();
+            hp.haltAndClearStorage(() => {
+                cy.visit("./cypress/fixtures/recording_zone_free.html");
+            });
+            cy.window().its("Countly.recording").invoke("status").its("buffering").should("equal", true);
+            // a change on the page, for the recorder's observer and its timer
+            cy.window().then((win) => {
+                win.document.getElementById("text").textContent = "changed";
+            });
+            cy.wait(2500).then(() => {
+                cy.window().then((win) => {
+                    expect(win.zoned.timers, "timers started with the patched functions").to.equal(0);
+                    expect(win.zoned.observers, "observers made with the patched constructor").to.equal(0);
+                    expect(win.zoneFree.observers, "the recorder's observer").to.be.above(0);
+                    expect(win.zoneFree.timers, "timers started with the browser's own functions").to.be.above(0);
+                    ["mousemove", "mousedown", "touchstart", "keydown", "hashchange", "popstate", "scroll", "resize", "visibilitychange", "input", "change", "transitionend", "pagehide", "pageshow"].forEach((type) => {
+                        expect(win.zoned.listeners, "listeners added with the patched function").not.to.include(type);
+                    });
+                    expect(win.zoneFree.listeners, "the recorder's own listeners").to.include.members(["mousemove", "input", "pagehide"]);
+                    // it still records: a triggered recording of the seconds so far
+                    var rid = win.Countly.recording.send({ reason: "tests", after: 1 });
+                    expect(rid).to.match(/^r[0-9a-f]{24}$/);
+                    recordingUploads(uploads, () => rid).then((chunks) => {
+                        expect(chunks.length).to.be.above(0);
+                    });
+                });
+            });
+        });
+
+        it("with the loader, loaded before it: the loader and the SDK take over the global object it made, and the first view carries the stream", () => {
+            acceptUploads();
+            hp.haltAndClearStorage(() => {
+                cy.visit("./cypress/fixtures/recording_loader.html");
+            });
+            cy.window().its("Countly.recording.version").should("equal", "0.1.0");
+            cy.window().its("Countly.recording").invoke("status").its("buffering").should("equal", true);
+            cy.window().its("sameObject").should("equal", true);
+            queuedView("landing").then((view) => {
+                cy.window().then((win) => {
+                    var stream = win.sessionStorage.getItem("cly_rsid");
+                    expect(stream).to.match(/^s[0-9a-f]{24}$/);
+                    expect(view.rsid, "the view made before init").to.equal(stream);
+                });
+            });
+        });
+    });
 });

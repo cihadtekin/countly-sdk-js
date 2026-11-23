@@ -4,6 +4,7 @@
 // the next page load of the site.
 
 import { openDb, STORES } from "./db.js";
+import * as zoneFree from "./zone-free.js";
 
 var STORE = STORES.OUTBOX;
 var KEEPALIVE_LIMIT = 60 * 1024;
@@ -120,8 +121,8 @@ function createOutbox(options) {
 
     /** @param {number} seconds - wait before the next attempt */
     function retryLater(seconds) {
-        clearTimeout(retryTimer);
-        retryTimer = setTimeout(function() {
+        zoneFree.clearTimer(retryTimer);
+        retryTimer = zoneFree.setTimer(function() {
             retryTimer = null;
             pump();
         }, seconds * 1000);
