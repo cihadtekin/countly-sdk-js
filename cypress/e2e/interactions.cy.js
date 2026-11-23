@@ -69,6 +69,23 @@ describe("Interactions: frustration signals, inputs and scroll stops", () => {
         });
     });
 
+    it("a click into a field, on a box, a list or a field's label is never a dead click: focus and values change no part of the page", () => {
+        openPage();
+        ["#name", "#search", "#note", "#terms"].forEach((field) => {
+            cy.get(field).click();
+            cy.wait(1100);
+        });
+        // Cypress does not click a list, which opens the browser's own menu: the click event alone
+        cy.get("#plan").trigger("click");
+        cy.wait(1100);
+        cy.contains("label", "Agree").click();
+        cy.wait(1500);
+        actions().then((list) => {
+            expect(ofType(list, "dead_click"), "dead clicks").to.have.length(0);
+            expect(ofType(list, "click").length, "the clicks themselves").to.be.at.least(5);
+        });
+    });
+
     it("a click followed by a JavaScript error is an error click, not a dead one", () => {
         openPage();
         cy.get("#throws").click();

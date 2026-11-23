@@ -130,6 +130,27 @@ function isInteractiveLooking(el) {
 }
 
 /**
+ * Does a click on the element answer with what changes no part of the page: focus, a typed or
+ * picked value, a checked box (a property, not an attribute), a file dialog? A field, a label
+ * that works one, an editable element. Such a click is never dead.
+ * @param {Element} el - element
+ * @returns {boolean} true for fields, their labels and editable elements
+ */
+function takesInput(el) {
+    if (!el || el.nodeType !== 1 || !el.matches) {
+        return false;
+    }
+    if (el.matches("input")) {
+        // a button-like input does something visible, or nothing
+        return !/^(button|submit|reset|image)$/i.test(el.type || "");
+    }
+    if (el.matches("select,textarea") || el.isContentEditable) {
+        return true;
+    }
+    return el.matches("label") && !!(el.control || el.querySelector("input,select,textarea"));
+}
+
+/**
  * The segments every interaction event carries.
  * @param {Element} el - described element
  * @param {Object} options - {maskAllText, nodeId}
@@ -241,7 +262,8 @@ function createClickOutcomeWatcher(report) {
         start();
         var at = Date.now();
         var href = window.location.href;
-        var watchDead = isInteractiveLooking(target);
+        // a field takes the click without changing the page: never a dead click
+        var watchDead = isInteractiveLooking(target) && !takesInput(target);
         sdkSetTimeout(function() {
             if (lastError >= at) {
                 report("error_click", target);
@@ -254,4 +276,4 @@ function createClickOutcomeWatcher(report) {
     };
 }
 
-export { isIgnored, selectorOf, labelOf, actionTarget, isInteractiveLooking, describeElement, describeField, createRageDetector, createClickOutcomeWatcher };
+export { isIgnored, selectorOf, labelOf, actionTarget, isInteractiveLooking, takesInput, describeElement, describeField, createRageDetector, createClickOutcomeWatcher };
