@@ -1,6 +1,8 @@
 // Element descriptions and frustration signals for the interaction events
 // (`[CLY]_action` click / input / submit / rage_click / dead_click / error_click).
-// Used by track_clicks and track_inputs, with or without Session Replay.
+// Used by track_clicks and track_inputs, with or without Session Replay. Its timers and
+// listeners run outside any zone.js zone, like the SDK's own (Utils.getZoneJsOriginal).
+import { getZoneJsOriginal, sdkSetTimeout } from "./Utils.js";
 
 var TEXT_LIMIT = 64;
 var SELECTOR_LIMIT = 128;
@@ -223,13 +225,14 @@ function createClickOutcomeWatcher(report) {
             });
             observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
         }
-        window.addEventListener("error", function() {
+        var listen = getZoneJsOriginal(window, "addEventListener");
+        listen.call(window, "error", function() {
             lastError = Date.now();
         }, true);
-        window.addEventListener("unhandledrejection", function() {
+        listen.call(window, "unhandledrejection", function() {
             lastError = Date.now();
         });
-        window.addEventListener("scroll", function() {
+        listen.call(window, "scroll", function() {
             lastScroll = Date.now();
         }, true);
     }
@@ -239,7 +242,7 @@ function createClickOutcomeWatcher(report) {
         var at = Date.now();
         var href = window.location.href;
         var watchDead = isInteractiveLooking(target);
-        setTimeout(function() {
+        sdkSetTimeout(function() {
             if (lastError >= at) {
                 report("error_click", target);
                 return;

@@ -90,8 +90,9 @@ export function toWebTest(text, folder) {
  * @returns {string} the fixture for countly-sdk-web
  */
 export function toWebFixture(html) {
-    const page = html.replace(/(["'])\.\.\/\.\.\/modules\/recording\/index\.js\1/g, "$1../../lib/countly_recording.js$1");
+    const withModule = html.replace(/(["'])\.\.\/\.\.\/modules\/recording\/index\.js\1/g, "$1../../lib/countly_recording.js$1");
     const importLine = /^[ \t]*import Countly from (["'])\.\.\/\.\.\/Countly\.js\1;[ \t]*\r?\n/m;
+    const page = withModule.replace(/"countly-sdk-web": "\.\.\/\.\.\/Countly\.js"/, "\"countly-sdk-web\": \"./countly_sdk_module.js\"");
     if (!importLine.test(page)) {
         return page;
     }

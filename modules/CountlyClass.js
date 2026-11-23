@@ -1,5 +1,5 @@
 import { actionTarget, createClickOutcomeWatcher, createRageDetector, describeElement, describeField, isIgnored } from "./Interactions.js";
-import { DeviceIdTypeInternalEnums, SDK_NAME, SDK_VERSION, configurationDefaultValues, contentReservedSegmentationKeys, contentReservedSegmentationPrefix, featureEnums, featureList, healthCheckCounterEnum, internalEventKeyEnums, internalEventKeyEnumsArray, logGatheringDefaultValues, logLevelEnums, logLevelToListenerName, logLevelToWireChar, logLineConsent, pushConstants, pushMessageTypes, pushStorageKeys, pushWorkerParams, tabHandoverTimes, urlParseRE } from "./Constants.js";
+import { DeviceIdTypeInternalEnums, SDK_NAME, SDK_VERSION, configurationDefaultValues, contentReservedSegmentationKeys, contentReservedSegmentationPrefix, contentTriggerGaps, contentTriggerKeys, featureEnums, featureList, healthCheckCounterEnum, internalEventKeyEnums, internalEventKeyEnumsArray, logGatheringDefaultValues, logLevelEnums, logLevelToListenerName, logLevelToWireChar, logLineConsent, pushConstants, pushMessageTypes, pushStorageKeys, pushWorkerParams, requestCompressionValues, tabHandoverTimes, urlParseRE } from "./Constants.js";
 import { runConnectionTest, probeViaFetch, capReport } from "./ConnectionTest.js";
 import {
     isSafeActionUrl,
@@ -25,7 +25,15 @@ import {
     truncateObject,
     truncateSingleValue,
     get_closest_element,
+    getZoneJsOriginal,
+    sdkSetTimeout,
+    sdkClearTimeout,
+    sdkSetInterval,
+    sdkClearInterval,
     add_event_listener,
+    remove_event_listener,
+    locationChangeEvent,
+    watchHistory,
     get_event_target,
     currentUserAgentString,
     currentUserAgentDataString,
@@ -43,6 +51,7 @@ import {
     hideLoader,
     getUserAgentClientHints,
     calculateChecksum,
+    gzipRequestBody,
     base64ToBytes,
     parseUrlParts
 } from "./Utils.js";
@@ -134,6 +143,17 @@ class CountlyClass {
     #contentIframeID;
     #crashFilterCallback;
     #logListener = null;
+    #autoViewTracking = false;
+    #autoViewExclusions = [];
+    #autoViewMode = "auto";
+    #lastViewUrl = null;
+    #autoViewListener = null;
+    #autoViewTimer = null;
+    #initialConsents = [];
+    #giveAllConsents = false;
+    #initialConsentsGiven = false;
+    #replayTime = null;
+    #autoViewReady = false;
     #serverConfigCache;
     #SCNetwork;
     #SCSizeReqQueue;
@@ -171,6 +191,12 @@ class CountlyClass {
     #SCEventSegmentationBlacklist;
     #SCEventSegmentationWhitelist;
     #SCJourneyTriggerEvents;
+    #SCContentTriggers;
+    #autoContentTriggersDisabled;
+    #liveSettingsSettled;
+    #earlyContentTriggers;
+    #contentTriggerGaps;
+    #contentTriggerChain;
     #SCLogGathering;
     #logBuffer;
     #logHeld;
@@ -180,6 +206,9 @@ class CountlyClass {
     #initContentSent;
     #initTimestamp;
     #isSCDisabled;
+    #requestCompressionEnabled;
+    #gzipAcceptingUrl;
+    #requestCompressionBlocked;
     #connectionTestRunning = false;
     #standingInForAnotherUser = false;
     #lastRequestDuration;
@@ -263,6 +292,7 @@ class CountlyClass {
         this.#lastBeat;
         this.#storedDuration = 0;
         this.#lastView = null;
+        this.#lastViewUrl = null;
         this.#lastViewTime = 0;
         this.#lastViewStoredDuration = 0;
         this.#failTimeout = 0;
@@ -312,6 +342,8 @@ class CountlyClass {
         this.#SCEnableContent = false;
         this.#SCEnableRefreshContentZone = true;    
         this.#SCEnableConsentRequired = getConfig("require_consent", ob, false);
+        this.#initialConsents = getConfig("consents", ob, []);
+        this.#giveAllConsents = getConfig("give_all_consents", ob, false) === true;
         this.#SCLimitKeyLength = getConfig("max_key_length", ob, configurationDefaultValues.MAX_KEY_LENGTH);
         this.#SCLimitValueSize = getConfig("max_value_size", ob, configurationDefaultValues.MAX_VALUE_SIZE);
         this.#SCLimitSegmentationValues = getConfig("max_segmentation_values", ob, configurationDefaultValues.MAX_SEGMENTATION_VALUES);
@@ -320,6 +352,7 @@ class CountlyClass {
         this.#SCLimitStackTraceLineLength = getConfig("max_stack_trace_line_length", ob, configurationDefaultValues.MAX_STACKTRACE_LINE_LENGTH);
         this.#SCBackoffMechanismEnabled = !getConfig("disable_backoff_mechanism", ob, false);
         this.#disableHealthCheck = !!getConfig("disable_health_check", ob, false);
+        this.#autoContentTriggersDisabled = !!getConfig("disable_auto_content_triggers", ob, false);
         this.#SCBackoffAcceptedTimeout = 10; // 10 seconds
         this.#SCBackoffRQPercentage = 0.5; // 50% of the request queue
         this.#SCBackoffRequestAge = 24; // 24 hours
@@ -334,6 +367,11 @@ class CountlyClass {
         this.#SCEventSegmentationBlacklist = {};
         this.#SCEventSegmentationWhitelist = {};
         this.#SCJourneyTriggerEvents = [];
+        this.#SCContentTriggers = null;
+        this.#liveSettingsSettled = false;
+        this.#earlyContentTriggers = [];
+        this.#contentTriggerGaps = {};
+        this.#contentTriggerChain = 0;
         // undecided until the server answers, so the init lines below are captured and adopted or dropped later
         this.#resetLogGathering(false);
         this.#requestTimeoutDuration = 30000; // 30 seconds
@@ -354,6 +392,9 @@ class CountlyClass {
         this.serialize = getConfig("serialize", ob, Countly.serialize);
         this.deserialize = getConfig("deserialize", ob, Countly.deserialize);
         this.#isSCDisabled = getConfig("disable_sdk_behavior_settings_updates", ob, false);
+        this.#requestCompressionEnabled = getConfig("enable_request_compression", ob, false) === true;
+        this.#gzipAcceptingUrl = null;
+        this.#requestCompressionBlocked = false;
         this.#backOffLogShown = false;
         this.#testModeTime = getConfig("test_mode_time", ob, 0); 
         try {
@@ -384,7 +425,7 @@ class CountlyClass {
         // start SDK
         this.#notifyLoaders();
 
-        setTimeout(() => {
+        sdkSetTimeout(() => {
             if (!Countly.noHeartBeat) {
                 this.#heartBeat();
             } else {
@@ -412,11 +453,140 @@ class CountlyClass {
                 }
             });
         }
+        this.#giveInitialConsents();
         if (this.#SCEnableContent) {
             this.#enterContentZoneInternal();
             this.#initContentSent = true;
         }
+        this.#startAutomaticViewTracking();
         this.#log(logLevelEnums.INFO, "initialize, Countly initialized");
+    };
+
+    /**
+     * Gives the consent of the consents and give_all_consents init options, once consent is required: at init, or when
+     * the server's behavior settings start requiring it later. While consent is not required they have no effect.
+     */
+    #giveInitialConsents = () => {
+        var features = this.#giveAllConsents ? Countly.features : this.#initialConsents;
+        if (this.#initialConsentsGiven || !features || !features.length) {
+            return;
+        }
+        if (!this.#SCEnableConsentRequired) {
+            this.#log(logLevelEnums.INFO, "initialize, Consent is not required, so the consent of the init options has no effect for now");
+            return;
+        }
+        this.#initialConsentsGiven = true;
+        this.#log(logLevelEnums.INFO, "initialize, Giving the consent of the init options for [" + features + "]");
+        this.#addConsent(features);
+    };
+
+    /**
+     * Records a view for the page the visitor is on, and a new one each time a single-page app moves to another page:
+     * history.pushState and history.replaceState calls, the back and forward buttons and hash changes. A page is told
+     * apart and named as #automaticViewPage says, so a change that keeps the page, such as a new query string, records
+     * no view. Pages whose name matches automatic_view_tracking_exclusions are not recorded.
+     * A page change is recorded once the code that changed the address has finished, so several changes made in one go,
+     * as a redirect makes, record only the page the app ends on.
+     */
+    #startAutomaticViewTracking = () => {
+        this.#autoViewReady = true;
+        if (!this.#autoViewTracking || this.#autoViewListener) {
+            return;
+        }
+        this.#log(logLevelEnums.INFO, "initialize, Automatic view tracking is on, recording a view for each page the visitor opens");
+        watchHistory();
+        this.#autoViewListener = () => {
+            if (this.#autoViewTimer !== null) {
+                return;
+            }
+            // routers update the route getViewName reads after the address changes: just after it for a link, a moment after it for the back button
+            this.#autoViewTimer = sdkSetTimeout(() => {
+                this.#autoViewTimer = null;
+                this.#trackAutomaticView();
+            }, 0);
+        };
+        add_event_listener(window, locationChangeEvent, this.#autoViewListener);
+        add_event_listener(window, "popstate", this.#autoViewListener);
+        add_event_listener(window, "hashchange", this.#autoViewListener);
+        this.#trackAutomaticView();
+    };
+
+    /**
+     * Records the page the visitor is on as an automatic view, unless the open view is already this page's, whether
+     * the SDK or a track_pageview call before automatic view tracking turned on recorded it
+     */
+    #trackAutomaticView = () => {
+        if (this.#halted || !this.#autoViewTracking) {
+            return;
+        }
+        var page = this.#automaticViewPage();
+        if (page.url === this.#lastViewUrl) {
+            return;
+        }
+        this.#lastViewUrl = page.url;
+        this.#HealthCheck.recordUsage("views", "start");
+        this.#trackPageview(page.name, this.#autoViewExclusions, undefined, page.url);
+    };
+
+    /**
+     * The address and the name of the page the visitor is on, for automatic view tracking. They come from the getViewUrl
+     * and getViewName the app gives, and otherwise from automatic_view_tracking_mode: "history" takes the page path,
+     * "hash" the route after # or #! without its query, and "auto" that route when it starts with /, as a hash
+     * router's does, and the page path otherwise, so a link to an anchor on the page is not a page
+     * @returns {Object} url and name of the page
+     */
+    #automaticViewPage = () => {
+        var hash = window.location.hash;
+        var prefix = hash.indexOf("#!") === 0 ? "#!" : "#";
+        var route = null;
+        if (this.#autoViewMode === "hash" || (this.#autoViewMode === "auto" && hash.indexOf(prefix + "/") === 0)) {
+            route = hash.slice(prefix.length).split("?")[0] || "/";
+        }
+        return {
+            url: route && this.getViewUrl.clyDefault ? window.location.pathname + prefix + route : this.getViewUrl(),
+            name: route && this.getViewName.clyDefault ? route : this.getViewName()
+        };
+    };
+
+    /**
+     * Turns automatic view tracking on or off as the server's behavior settings say ("avt"), over the init option.
+     * While init runs it only sets the option; afterwards it starts or stops recording page changes.
+     * @param {boolean} on - whether the SDK records the pages itself
+     */
+    #setAutomaticViewTracking = (on) => {
+        if (!isBrowser) {
+            return;
+        }
+        if (!this.#autoViewReady) {
+            this.#autoViewTracking = on;
+            return;
+        }
+        if (on && !this.#autoViewListener) {
+            this.#log(logLevelEnums.INFO, "server_config, Behavior settings turned automatic view tracking on");
+            this.#autoViewTracking = true;
+            this.#startAutomaticViewTracking();
+        }
+        else if (!on && this.#autoViewListener) {
+            this.#log(logLevelEnums.INFO, "server_config, Behavior settings turned automatic view tracking off");
+            this.#stopAutomaticViewTracking();
+        }
+    };
+
+    /**
+     * Stops recording a view for each page change
+     */
+    #stopAutomaticViewTracking = () => {
+        if (this.#autoViewListener) {
+            remove_event_listener(window, locationChangeEvent, this.#autoViewListener);
+            remove_event_listener(window, "popstate", this.#autoViewListener);
+            remove_event_listener(window, "hashchange", this.#autoViewListener);
+            this.#autoViewListener = null;
+        }
+        if (this.#autoViewTimer !== null) {
+            sdkClearTimeout(this.#autoViewTimer);
+            this.#autoViewTimer = null;
+        }
+        this.#autoViewTracking = false;
     };
 
     /**
@@ -444,7 +614,7 @@ class CountlyClass {
         this.#pendingRequestBuffer = []; // enable request buffering until hints resolve
 
         // Safety timeout: flush buffer even if hints never resolve (e.g. API blocked)
-        this.#clientHintsBufferTimeoutId = setTimeout(() => {
+        this.#clientHintsBufferTimeoutId = sdkSetTimeout(() => {
             if (this.#pendingRequestBuffer !== null) {
                 this.#log(logLevelEnums.WARNING, "ua_logic, client hints resolution timed out after 1s, flushing pending requests with available metrics");
                 this.#flushPendingRequestBuffer();
@@ -480,7 +650,7 @@ class CountlyClass {
     #flushPendingRequestBuffer = () => {
         // Clear safety timeout
         if (this.#clientHintsBufferTimeoutId) {
-            clearTimeout(this.#clientHintsBufferTimeoutId);
+            sdkClearTimeout(this.#clientHintsBufferTimeoutId);
             this.#clientHintsBufferTimeoutId = null;
         }
 
@@ -521,6 +691,7 @@ class CountlyClass {
         if (this.#isSCDisabled) {
             this.#log(logLevelEnums.INFO, "server_config, SDK behavior sync is disabled, not fetching server config");
             this.#resolveProvisionalLogs("SDK behavior settings sync is disabled");
+            this.#settleEarlyContentTriggers(false);
             return;
         }
         this.#log(logLevelEnums.INFO, "server_config, Fetching server config");
@@ -536,12 +707,19 @@ class CountlyClass {
         params.dow = date.getDay();
         params.av = this.app_version;
         params.method = "sc";
+        if (this.#requestCompressionEnabled) {
+            params.gzip = 1;
+        }
+        if (!this.#autoContentTriggersDisabled) {
+            params.jt = 1;
+        }
         var scStart = Date.now();
         var sentUrl = this.url;
         this.#makeNetworkRequest("server_config", this.url + this.#readPath, params, (err, params, responseText) => {
             if (err) {
                 // error has been logged by the request function
                 this.#resolveProvisionalLogs("server config request failed");
+                this.#settleEarlyContentTriggers(false);
                 return;
             }
             if (params.app_key !== this.app_key || sentUrl !== this.url) {
@@ -558,6 +736,18 @@ class CountlyClass {
                 if (config && typeof config.ct !== "undefined") {
                     delete config.ct;
                 }
+                var gzipAccepted = !!(config && config.gzip === true);
+                if (config && typeof config.gzip !== "undefined") {
+                    delete config.gzip;
+                }
+                if (this.#requestCompressionEnabled) {
+                    this.#gzipAcceptingUrl = gzipAccepted ? sentUrl : null;
+                    if (gzipAccepted && this.#requestCompressionBlocked) {
+                        this.#requestCompressionBlocked = false;
+                        this.#log(logLevelEnums.INFO, "server_config, A behavior settings answer says that the server reads compressed bodies, requests are compressed again");
+                    }
+                    this.#log(logLevelEnums.DEBUG, "server_config, The server " + (gzipAccepted ? "reads" : "does not say it reads") + " compressed request bodies");
+                }
                 if (config) {
                     this.#populateServerConfig(config);
                     this.#syncPushWorkerConfig();
@@ -568,14 +758,16 @@ class CountlyClass {
                 if (armed) {
                     this.#runConnectionTest(Date.now() - scStart);
                 }
+                this.#settleEarlyContentTriggers(!!config);
             }
             catch (ex) {
                 this.#log(logLevelEnums.DEBUG, "server_config, Had an issue while parsing the response: " + ex);
                 this.#resolveProvisionalLogs("server config response could not be parsed");
+                this.#settleEarlyContentTriggers(false);
             }
         }, true, true);
-        clearTimeout(this.#serverConfigTimer);
-        this.#serverConfigTimer = setTimeout(() => {
+        sdkClearTimeout(this.#serverConfigTimer);
+        this.#serverConfigTimer = sdkSetTimeout(() => {
             this.#getAndSetServerConfig();
         }, this.#SCInterval * 60 * 60 * 1000);
     }
@@ -623,7 +815,12 @@ class CountlyClass {
      * @param {Object} mainCache - Server configuration response object
      */
     #populateServerConfig = (mainCache) => {
-        if (!mainCache || !mainCache.c || typeof mainCache.c !== "object") {
+        if (!mainCache || typeof mainCache !== "object") {
+            return;
+        }
+        // the content triggers come next to the settings, also when the settings are empty
+        this.#SCContentTriggers = this.#autoContentTriggersDisabled ? null : this.#readContentTriggers(mainCache.jt);
+        if (!mainCache.c || typeof mainCache.c !== "object") {
             return;
         }
         var cache = mainCache.c;
@@ -666,6 +863,7 @@ class CountlyClass {
         if (cache.hasOwnProperty("cr")) {
             this.#SCEnableConsentRequired = cache.cr;
             this.#releaseHeldLogLines();
+            this.#giveInitialConsents();
         }
         if (cache.hasOwnProperty("st")) {
             this.#SCTrackingSession = cache.st;
@@ -675,6 +873,9 @@ class CountlyClass {
         }
         if (cache.hasOwnProperty("vt")) {
             this.#SCTrackingViews = cache.vt;
+        }
+        if (Object.prototype.hasOwnProperty.call(cache, "avt")) {
+            this.#setAutomaticViewTracking(cache.avt === true);
         }
         if (cache.hasOwnProperty("cet")) {
             this.#SCTrackingEvents = cache.cet;
@@ -754,6 +955,38 @@ class CountlyClass {
     };
 
     /**
+     * Reads the content triggers ("jt") that come next to the settings ("c") in a behavior settings answer
+     * @private
+     * @param {Object} value - the "jt" value of the answer: { e: [event keys], v: [view names], p: [user properties] }
+     * @returns {Object|null} { e, v, p }: the event keys, view names and user properties whose recording makes the SDK
+     * ask for content right away; null when the answer has no content triggers or an invalid value, so the journey
+     * trigger events apply
+     */
+    #readContentTriggers = (value) => {
+        var triggers = { e: [], v: [], p: [] };
+        if (typeof value === "undefined") {
+            return null;
+        }
+        if (!value || typeof value !== "object" || Array.isArray(value)) {
+            this.#log(logLevelEnums.WARNING, "server_config, Content triggers (jt) must be an object, ignoring them: [" + JSON.stringify(value) + "]");
+            return null;
+        }
+        var lists = ["e", "v", "p"];
+        for (var i = 0; i < lists.length; i++) {
+            var list = value[lists[i]];
+            if (typeof list === "undefined") {
+                continue;
+            }
+            if (!Array.isArray(list)) {
+                this.#log(logLevelEnums.WARNING, "server_config, Content triggers (jt) list [" + lists[i] + "] must be an array, ignoring it");
+                continue;
+            }
+            triggers[lists[i]] = list.filter((item) => typeof item === "string" && item !== "");
+        }
+        return triggers;
+    };
+
+    /**
      * Initialize the Countly
      * @param {Object} ob - config object
      */
@@ -804,6 +1037,13 @@ class CountlyClass {
             this.#lsSupport = false;
         }
         this.enableOrientationTracking = !isBrowser ? undefined : getConfig("enable_orientation_tracking", ob, true);
+        this.#autoViewTracking = isBrowser && getConfig("enable_automatic_view_tracking", ob, false) === true;
+        this.#autoViewExclusions = getConfig("automatic_view_tracking_exclusions", ob, []);
+        this.#autoViewMode = getConfig("automatic_view_tracking_mode", ob, "auto");
+        if (["auto", "history", "hash"].indexOf(this.#autoViewMode) === -1) {
+            this.#log(logLevelEnums.WARNING, "initialize, automatic_view_tracking_mode is \"auto\", \"history\" or \"hash\", not [" + this.#autoViewMode + "], so \"auto\" is used");
+            this.#autoViewMode = "auto";
+        }
         this.heatmapWhitelist = getConfig("heatmap_whitelist", ob, []);
         this.contentWhitelist = getConfig("content_whitelist", ob, []);
         var globalContentSegmentation = getConfig("global_content_segmentation", ob, null);
@@ -1068,6 +1308,9 @@ class CountlyClass {
         if (this.#SCIntervalContent) {
             this.#log(logLevelEnums.DEBUG, "initialize, content_zone_timer_interval:[" + this.#SCIntervalContent + "]");
         }
+        if (this.#autoContentTriggersDisabled) {
+            this.#log(logLevelEnums.DEBUG, "initialize, Automatic content triggers are disabled: the SDK does not ask for the content triggers (jt), and the journey trigger events (jte) apply");
+        }
         // functions, if provided, would be printed as true without revealing their content
         this.#log(logLevelEnums.DEBUG, "initialize, 'getViewName' callback override provided:[" + (this.getViewName !== Countly.getViewName) + "]");
         this.#log(logLevelEnums.DEBUG, "initialize, 'getSearchQuery' callback override provided:[" + (this.getSearchQuery !== Countly.getSearchQuery) + "]");
@@ -1309,7 +1552,7 @@ class CountlyClass {
             this.#log(logLevelEnums.ERROR, "initPushMessageListener, Failed to register service worker message listener: " + e);
         }
 
-        setTimeout(() => {
+        sdkSetTimeout(() => {
             this.#autoRegisterPush();
         }, 1);
     };
@@ -1866,10 +2109,10 @@ class CountlyClass {
     #updateConsent = () => {
         if (this.#consentTimer) {
             // delay syncing consents
-            clearTimeout(this.#consentTimer);
+            sdkClearTimeout(this.#consentTimer);
             this.#consentTimer = null;
         }
-        this.#consentTimer = setTimeout(() => {
+        this.#consentTimer = sdkSetTimeout(() => {
             var consentMessage = {};
             for (var i = 0; i < Countly.features.length; i++) {
                 if (this.#consents[Countly.features[i]].optin === true) {
@@ -1881,6 +2124,7 @@ class CountlyClass {
             }
             this.#toRequestQueue({ consent: JSON.stringify(consentMessage) });
             this.#log(logLevelEnums.DEBUG, "Consent update request has been sent to the queue.");
+            this.#handleJourneyTrigger(contentTriggerKeys.CONSENT);
         }, 1000);
     };
 
@@ -1894,6 +2138,7 @@ class CountlyClass {
     halt = () => {
         this.#log(logLevelEnums.WARNING, "halt, Resetting Countly");
         this.#halted = true;
+        this.#stopAutomaticViewTracking();
         Countly.i = undefined;
         if (Array.isArray(Countly.q)) {
             Countly.q.length = 0;
@@ -1918,12 +2163,13 @@ class CountlyClass {
         this.#autoExtend = true;
         this.#storedDuration = 0;
         this.#lastView = null;
+        this.#lastViewUrl = null;
         this.#lastViewTime = 0;
         this.#lastViewStoredDuration = 0;
         this.#failTimeout = 0;
         this.#failTimeoutAmount = 60;
-        clearTimeout(this.#collectTimer);
-        clearTimeout(this.#pauseTimer);
+        sdkClearTimeout(this.#collectTimer);
+        sdkClearTimeout(this.#pauseTimer);
         this.#collectUntil = 0;
         this.#pausedUntil = 0;
         this.#deferredRequests = [];
@@ -2016,6 +2262,9 @@ class CountlyClass {
         this.ip_address = undefined;
         this.ignore_bots = undefined;
         this.force_post = undefined;
+        this.#requestCompressionEnabled = false;
+        this.#gzipAcceptingUrl = null;
+        this.#requestCompressionBlocked = false;
         this.rcAutoOptinAb = undefined;
         this.useExplicitRcApi = undefined;
         this.remote_config = undefined;
@@ -2053,11 +2302,13 @@ class CountlyClass {
         this.#fakeRequestHandler = undefined;
         this.#journeyTriggerInProgress = undefined;
         this.#journeyTriggerPending = undefined;
+        this.#contentTriggerGaps = {};
+        this.#contentTriggerChain = 0;
         this.#contentZoneWanted = undefined;
         this.#contentZoneExited = false;
         this.#journeyPendingEventIds = undefined;
         if (this.#clientHintsBufferTimeoutId) {
-            clearTimeout(this.#clientHintsBufferTimeoutId);
+            sdkClearTimeout(this.#clientHintsBufferTimeoutId);
             this.#clientHintsBufferTimeoutId = null;
         }
         this.#serverConfigAfterMerge = false;
@@ -2208,17 +2459,29 @@ class CountlyClass {
     * @param {string|array} feature - name of the feature, possible values, "sessions","events","views","scrolls","clicks","forms","crashes","attribution","users", etc or custom provided through {@link Countly.group_features}
     */
     add_consent = (feature) => {
+        this.#addConsent(feature);
+        if (Countly.q.length > 0) {
+            this.#processAsyncQueue();
+        }
+    };
+
+    /**
+     * Gives consent for a feature or group and the features in it; the calls waiting in Countly.q run after it, so that
+     * the calls made before init get the consent an app gives right after init
+     * @param {string|array} feature - name of the feature, or an array of them
+     */
+    #addConsent = (feature) => {
         this.#log(logLevelEnums.INFO, "add_consent, Adding consent for [" + feature + "]");
         if (Array.isArray(feature)) {
             for (var i = 0; i < feature.length; i++) {
-                this.add_consent(feature[i]);
+                this.#addConsent(feature[i]);
             }
         }
         else if (this.#consents[feature]) {
             if (this.#consents[feature].features) {
                 this.#consents[feature].optin = true;
                 // this is added group, let's iterate through sub features
-                this.add_consent(this.#consents[feature].features);
+                this.#addConsent(this.#consents[feature].features);
             }
             else {
                 // this is core feature
@@ -2229,7 +2492,7 @@ class CountlyClass {
                     if (feature === featureEnums.SESSION_REPLAY && this.#recordingBridge && typeof this.#recordingBridge.onConsent === "function") {
                         this.#recordingBridge.onConsent(true);
                     }
-                    setTimeout(() => {
+                    sdkSetTimeout(() => {
                         if (feature === featureEnums.SESSIONS && this.#lastParams.begin_session) {
                             var pendingSession = this.#lastParams.begin_session;
                             this.#lastParams.begin_session = null;
@@ -2443,8 +2706,8 @@ class CountlyClass {
                         this.#orientationListening = true;
                         let orientationTimeout;
                         add_event_listener(window, "resize", () => {
-                            clearTimeout(orientationTimeout);
-                            orientationTimeout = setTimeout(() => {
+                            sdkClearTimeout(orientationTimeout);
+                            orientationTimeout = sdkSetTimeout(() => {
                                 this.#report_orientation();
                             }, 200);
                         });
@@ -2470,6 +2733,7 @@ class CountlyClass {
                     this.#toRequestQueue(req);
                     this.#renewPushTokenForSession();
                     this.#HealthCheck.sendInstantHCRequest();
+                    this.#handleJourneyTrigger(contentTriggerKeys.SESSION);
                 }
                 this.#setValueInStorage("cly_session", getTimestamp() + (this.#sessionCookieTimeout * 60));
                 return true;
@@ -2658,6 +2922,11 @@ class CountlyClass {
         else if (this.#autoSessionTracking) {
             // only automatic session tracking starts a session for the new ID, manual sessions are left to the developer
             this.#beginSession(!this.#autoExtend, true, true);
+        }
+        if (!merge && this.#autoViewTracking) {
+            // the page that is shown starts a view for the new ID; while consent is required it waits for the "views" consent
+            this.#lastViewUrl = null;
+            this.#trackAutomaticView();
         }
         this.#handlePushOnDeviceIdChange(merge, oldId);
         // the behavior settings and remote config can differ for the new ID. A fetch creates the user of an ID the server has not seen,
@@ -3455,8 +3724,9 @@ class CountlyClass {
         event.segmentation = truncateObject(event.segmentation, this.#SCLimitKeyLength, this.#SCLimitValueSize , this.#SCLimitSegmentationValues, "add_cly_event", this.#log);
         var props = ["key", "count", "sum", "dur", "segmentation"];
         var e = createNewObjectFromProperties(event, props);
-        e.timestamp = timestampOverride || getMsTimestamp();
-        var date = timestampOverride ? new Date(timestampOverride) : new Date();
+        var eventTime = timestampOverride || this.#replayTime;
+        e.timestamp = eventTime || getMsTimestamp();
+        var date = eventTime ? new Date(eventTime) : new Date();
         e.hour = date.getHours();
         e.dow = date.getDay();
         e.id = eventIdOverride || secureRandom();
@@ -3481,7 +3751,13 @@ class CountlyClass {
         this.#eventQueue.push(e);
         this.#saveEventQueue();
         this.#log(logLevelEnums.INFO, "With event ID: [" + e.id + "], successfully adding the last event:", e);
-        this.#handleJourneyTrigger(initialKey, e.id);
+        if (e.key !== internalEventKeyEnums.VIEW) {
+            this.#handleJourneyTrigger(initialKey, e.id);
+        }
+        // only the start of a view is a trigger, the event recorded when it ends carries its duration
+        else if (e.segmentation && e.segmentation.visit === 1) {
+            this.#handleJourneyTrigger(initialKey, e.id, e.segmentation.name);
+        }
         if (this.#recordingBridge && typeof this.#recordingBridge.onEvent === "function") {
             // event and view triggers of Session Replay
             this.#recordingBridge.onEvent(e);
@@ -3595,31 +3871,185 @@ class CountlyClass {
     }
 
     /**
-     * Handle journey trigger event
-     * @param {String} eventKey - Event key to check for journey trigger
+     * Whether recording this makes the SDK ask for content right away, and how long the same trigger then waits before
+     * it can ask again. When the server sent content triggers ("jt"), only they decide, and only while the app wants
+     * the content zone: a view or user property they list by name is specific; a key they list is specific too, except
+     * any view, any user property change and any error, which can happen often. Otherwise (an older server, or
+     * disable_auto_content_triggers set) a key the journey trigger events ("jte") list, by the same rule
+     * @private
+     * @param {String} key - event key, or the content trigger key of what was recorded
+     * @param {String} [viewName] - name of the recorded view
+     * @param {Array<String>} [properties] - the user properties a user details request sends
+     * @returns {Object|null} { gapKeys, gapMs } when it is a content trigger: the triggers the gap is counted for, and
+     * the gap in milliseconds; null when it is not one
      */
-    #handleJourneyTrigger = (eventKey, eventId) => {
-        if (!Array.isArray(this.#SCJourneyTriggerEvents) || this.#SCJourneyTriggerEvents.length === 0) {
+    #contentTriggerMatch = (key, viewName, properties) => {
+        var triggers = this.#SCContentTriggers;
+        if (triggers) {
+            if (!this.#contentZoneWanted) {
+                return null;
+            }
+            if (key === internalEventKeyEnums.VIEW && typeof viewName === "string" && triggers.v.indexOf(viewName) !== -1) {
+                return { gapKeys: ["v:" + viewName], gapMs: contentTriggerGaps.SPECIFIC };
+            }
+            if (key === contentTriggerKeys.USER_PROPERTIES && Array.isArray(properties)) {
+                var listed = properties.filter((name) => triggers.p.indexOf(name) !== -1);
+                if (listed.length > 0) {
+                    return { gapKeys: listed.map((name) => "p:" + name), gapMs: contentTriggerGaps.SPECIFIC };
+                }
+            }
+            if (triggers.e.indexOf(key) === -1) {
+                return null;
+            }
+        }
+        else if (!Array.isArray(this.#SCJourneyTriggerEvents) || this.#SCJourneyTriggerEvents.indexOf(key) === -1) {
+            return null;
+        }
+        var nonSpecific = key === internalEventKeyEnums.VIEW || key === contentTriggerKeys.USER_PROPERTIES || key === contentTriggerKeys.CRASH;
+        return { gapKeys: [key], gapMs: nonSpecific ? contentTriggerGaps.NON_SPECIFIC : contentTriggerGaps.SPECIFIC };
+    };
+
+    /**
+     * Whether a matched content trigger may ask for content now. When it may, its time is kept, in storage so that the
+     * gap holds across the pages of a website and its tabs
+     * @private
+     * @param {Object} match - { gapKeys, gapMs } of the matched trigger
+     * @returns {Boolean} true when at least one of the triggers is outside its gap
+     */
+    #claimContentTriggerGap = (match) => {
+        var now = Date.now();
+        var stored = this.#getValueFromStorage("cly_ct_gaps");
+        var times = stored && typeof stored === "object" && !Array.isArray(stored) ? stored : this.#contentTriggerGaps;
+        var inGap = (time, gapMs) => typeof time === "number" && now >= time && now - time < gapMs;
+        if (match.gapKeys.every((gapKey) => inGap(times[gapKey], match.gapMs))) {
+            return false;
+        }
+        var kept = {};
+        for (var gapKey in times) {
+            if (inGap(times[gapKey], contentTriggerGaps.NON_SPECIFIC)) {
+                kept[gapKey] = times[gapKey];
+            }
+        }
+        match.gapKeys.forEach((key) => {
+            kept[key] = now;
+        });
+        this.#contentTriggerGaps = kept;
+        this.#setValueInStorage("cly_ct_gaps", kept);
+        return true;
+    };
+
+    /**
+     * The user properties a user details request sends, as content triggers list them: a user detail ("email"), or
+     * "custom." and the key of a custom property
+     * @private
+     * @param {Object} details - the user details the request sends
+     * @returns {Array<String>} the property names
+     */
+    #sentUserProperties = (details) => {
+        var names = [];
+        for (var key in details) {
+            if (key === "custom") {
+                if (details.custom && typeof details.custom === "object") {
+                    for (var customKey in details.custom) {
+                        names.push("custom." + customKey);
+                    }
+                }
+            }
+            else if (typeof details[key] !== "undefined") {
+                names.push(key);
+            }
+        }
+        return names;
+    };
+
+    /**
+     * Keeps what was recorded before the first behavior settings answer of this page load arrived, when the settings in
+     * use did not list it, so that the answer can still make the SDK ask for the content it started
+     * @private
+     * @param {String} key - event key, or the content trigger key of what was recorded
+     * @param {String} [viewName] - name of the recorded view
+     * @param {Array<String>} [properties] - the user properties a user details request sent
+     */
+    #rememberEarlyContentTrigger = (key, viewName, properties) => {
+        if (this.#liveSettingsSettled || this.#earlyContentTriggers.length >= 50) {
             return;
         }
-        if (this.#SCJourneyTriggerEvents.indexOf(eventKey) === -1) {
+        var propertyList = Array.isArray(properties) ? properties.join(",") : "";
+        for (var i = 0; i < this.#earlyContentTriggers.length; i++) {
+            var early = this.#earlyContentTriggers[i];
+            if (early.key === key && early.viewName === viewName && (Array.isArray(early.properties) ? early.properties.join(",") : "") === propertyList) {
+                return;
+            }
+        }
+        this.#earlyContentTriggers.push({ key: key, viewName: viewName, properties: properties });
+    };
+
+    /**
+     * Ends the wait for the first behavior settings answer of this page load. When the answer arrived, what was recorded
+     * before it and is listed by its content triggers makes the SDK ask for content once
+     * @private
+     * @param {Boolean} answered - true when the answer arrived and was applied
+     */
+    #settleEarlyContentTriggers = (answered) => {
+        var early = this.#earlyContentTriggers;
+        this.#earlyContentTriggers = [];
+        if (this.#liveSettingsSettled) {
+            return;
+        }
+        this.#liveSettingsSettled = true;
+        if (!answered) {
+            return;
+        }
+        for (var i = 0; i < early.length; i++) {
+            if (this.#contentTriggerMatch(early[i].key, early[i].viewName, early[i].properties)) {
+                this.#log(logLevelEnums.DEBUG, "journeyTrigger, [" + early[i].key + "] was recorded before the behavior settings arrived");
+                this.#handleJourneyTrigger(early[i].key, null, early[i].viewName, early[i].properties);
+                return;
+            }
+        }
+    };
+
+    /**
+     * Handle journey trigger event: when what was recorded is a content trigger outside its gap, sends what the SDK
+     * holds and asks for content. While a round of that is running, a new trigger only makes one more round follow it.
+     * A halted instance does neither, also for what is recorded through it until the next init
+     * @param {String} eventKey - Event key to check for journey trigger, or the content trigger key of what was recorded
+     * @param {String} [eventId] - ID of the recorded event
+     * @param {String} [viewName] - name of the recorded view
+     * @param {Array<String>} [properties] - the user properties a user details request sent
+     */
+    #handleJourneyTrigger = (eventKey, eventId, viewName, properties) => {
+        if (!isBrowser || this.#halted) {
+            return;
+        }
+        var match = this.#contentTriggerMatch(eventKey, viewName, properties);
+        if (!match) {
+            this.#rememberEarlyContentTrigger(eventKey, viewName, properties);
+            return;
+        }
+        if (this.#contentZoneExited || !this.check_consent(featureEnums.CONTENT)) {
+            this.#log(logLevelEnums.DEBUG, "journeyTrigger, Matched [" + eventKey + "], but content can not be shown now, so it is not asked for");
+            return;
+        }
+        if (!this.#claimContentTriggerGap(match)) {
+            this.#log(logLevelEnums.DEBUG, "journeyTrigger, Matched [" + eventKey + "], but it asked for content less than " + (match.gapMs / 1000) + " seconds ago");
             return;
         }
 
         this.#log(logLevelEnums.DEBUG, "journeyTrigger, Matched journey trigger event: [" + eventKey + "]");
-        this.#processAsyncQueue();
-        this.#sendEventsForced();
         if (eventId) {
             this.#journeyPendingEventIds.add(eventId);
         }
-        
-        // If already processing, mark as pending to re-trigger after current processing completes
+
+        // the round that follows the running one sends what is recorded until then, so nothing is sent early here
         if (this.#journeyTriggerInProgress) {
             this.#log(logLevelEnums.DEBUG, "journeyTrigger, Already processing, marking as pending");
             this.#journeyTriggerPending = true;
             return;
         }
-        
+
+        this.#processAsyncQueue();
+        this.#sendEventsForced();
         this.#processJourneyTriggerQueueAndContent();
     }
 
@@ -3631,7 +4061,7 @@ class CountlyClass {
      * @returns {Promise<void>}
      */
     #processJourneyTriggerQueueAndContent = async () => {
-        if (this.#journeyTriggerInProgress) {
+        if (this.#journeyTriggerInProgress || this.#halted) {
             return;
         }
         this.#journeyTriggerInProgress = true;
@@ -3653,7 +4083,10 @@ class CountlyClass {
                 this.#log(logLevelEnums.DEBUG, "journeyTrigger, Processing pending journey trigger");
                 this.#journeyTriggerPending = false;
                 // Use setTimeout to avoid stack overflow and allow current call to complete
-                setTimeout(() => {
+                sdkSetTimeout(() => {
+                    if (this.#halted) {
+                        return;
+                    }
                     this.#processAsyncQueue();
                     this.#sendEventsForced();
                     this.#processJourneyTriggerQueueAndContent();
@@ -3719,6 +4152,12 @@ class CountlyClass {
                 await this.#delay(500);
             }
 
+            if (this.#requestQueue.length === 0) {
+                this.#log(logLevelEnums.DEBUG, "journeyTrigger, The regular sending delivered the queued requests meanwhile");
+                resolve(true);
+                return;
+            }
+
             if (!this.#readyToProcess || this.#isInBackoff || getTimestamp() <= this.#failTimeout) {
                 resolve(false);
                 return;
@@ -3766,10 +4205,19 @@ class CountlyClass {
      * @param {number} [attempt=0] - Current attempt number for retry logic
      * @param {number} [waits=0] - How many times the request already waited for the journey events
      */
-    #triggerJourneyContentRequestWithRetries = (attempt, waits) => {
+    #triggerJourneyContentRequestWithRetries = (attempt, waits, chain) => {
         var currentAttempt = attempt || 0;
         var currentWaits = waits || 0;
         var maxAttempts = 3;
+        if (this.#halted) {
+            return;
+        }
+        // one round asks at a time: a newer round's requests replace the retries of an older one
+        var currentChain = typeof chain === "number" ? chain : ++this.#contentTriggerChain;
+        if (currentChain !== this.#contentTriggerChain) {
+            this.#log(logLevelEnums.DEBUG, "journeyTrigger, A newer round asks for the content, so this one stops");
+            return;
+        }
 
         // Skip if content is already being displayed (iframe exists)
         if (typeof document !== "undefined" && document.getElementById(this.#contentIframeID)) {
@@ -3780,8 +4228,8 @@ class CountlyClass {
         if (this.#journeyPendingEventIds && this.#journeyPendingEventIds.size > 0) {
             if (currentWaits < maxAttempts) {
                 this.#log(logLevelEnums.DEBUG, "journeyTrigger, Pending journey events not yet confirmed sent. Deferring content refresh.");
-                setTimeout(() => {
-                    this.#triggerJourneyContentRequestWithRetries(currentAttempt, currentWaits + 1);
+                sdkSetTimeout(() => {
+                    this.#triggerJourneyContentRequestWithRetries(currentAttempt, currentWaits + 1, currentChain);
                 }, 300);
                 return;
             }
@@ -3792,8 +4240,8 @@ class CountlyClass {
 
         var handleResult = (success) => {
             if (!success && currentAttempt + 1 < maxAttempts) {
-                setTimeout(() => {
-                    this.#triggerJourneyContentRequestWithRetries(currentAttempt + 1, currentWaits);
+                sdkSetTimeout(() => {
+                    this.#triggerJourneyContentRequestWithRetries(currentAttempt + 1, currentWaits, currentChain);
                 }, 1000);
             }
         };
@@ -3806,7 +4254,7 @@ class CountlyClass {
      * @param {number} ms - Number of milliseconds to delay
      * @returns {Promise} Promise that resolves after the specified delay
      */
-    #delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    #delay = (ms) => new Promise((resolve) => sdkSetTimeout(resolve, ms));
 
     /**
     * Start timed event, which will fill in duration property upon ending automatically
@@ -3828,7 +4276,7 @@ class CountlyClass {
             this.#HealthCheck.recordLogCode("w722", "events");
             return;
         }
-        this.#timedEvents[key] = getTimestamp();
+        this.#timedEvents[key] = this.#callTime();
     };
 
     /**
@@ -3883,7 +4331,7 @@ class CountlyClass {
             this.#HealthCheck.recordLogCode("w720", "events");
             return;
         }
-        event.dur = getTimestamp() - this.#timedEvents[event.key];
+        event.dur = this.#callTime() - this.#timedEvents[event.key];
         this.#addEvent(event);
         delete this.#timedEvents[event.key];
     };
@@ -3978,7 +4426,9 @@ class CountlyClass {
             user.custom = truncateObject(user.custom, this.#SCLimitKeyLength, this.#SCLimitValueSize , this.#SCLimitSegmentationValues, "user_details", this.#log);
             var props = ["name", "username", "email", "organization", "phone", "picture", "gender", "byear", "custom"];
             this.userData.save(); // ensure user data (and events) is saved before sending user details
-            this.#toRequestQueue({ user_details: JSON.stringify(createNewObjectFromProperties(user, props)) });
+            var details = createNewObjectFromProperties(user, props);
+            this.#toRequestQueue({ user_details: JSON.stringify(details) });
+            this.#handleJourneyTrigger(contentTriggerKeys.USER_PROPERTIES, null, null, this.#sentUserProperties(details));
         }
     };
 
@@ -4212,8 +4662,10 @@ class CountlyClass {
                 return;
             }
             this.#log(logLevelEnums.INFO, "[userData] save, will send the following custom data to server: [" + JSON.stringify(this.#customData) + "]");
+            var sentProperties = this.#sentUserProperties({ custom: this.#customData });
             this.#toRequestQueue({ user_details: JSON.stringify({ custom: this.#customData }) });
             this.#customData = {};
+            this.#handleJourneyTrigger(contentTriggerKeys.USER_PROPERTIES, null, null, sentProperties);
         }
     };
 
@@ -4270,7 +4722,7 @@ class CountlyClass {
             window.cly_crashes = true;
             this.#crashSegments = segments;
             // override global 'uncaught error' handler
-            window.addEventListener("error", (event) => {
+            add_event_listener(window, "error", (event) => {
                 if (event.error) {
                     dispatchErrors(event.error, false); // false indicates fatal error
                 } else {
@@ -4299,7 +4751,7 @@ class CountlyClass {
             });
 
             // error handling for 'uncaught rejections'
-            window.addEventListener("unhandledrejection", (event) => {
+            add_event_listener(window, "unhandledrejection", (event) => {
                 // true indicates non fatal error (as in non_fatal: true)
                 dispatchErrors(new Error("Unhandled rejection (reason: " + (event.reason && event.reason.stack ? this.#stackWithMessage(event.reason) : event.reason) + ")."), true);
             });
@@ -4617,19 +5069,19 @@ class CountlyClass {
 
         // Page Visibility API for changing tabs and minimizing browser
         if (hidden in document) {
-            document.addEventListener("visibilitychange", onchange);
+            add_event_listener(document, "visibilitychange", onchange);
         }
         else if ("mozHidden" in document) {
             hidden = "mozHidden";
-            document.addEventListener("mozvisibilitychange", onchange);
+            add_event_listener(document, "mozvisibilitychange", onchange);
         }
         else if ("webkitHidden" in document) {
             hidden = "webkitHidden";
-            document.addEventListener("webkitvisibilitychange", onchange);
+            add_event_listener(document, "webkitvisibilitychange", onchange);
         }
         else if ("msHidden" in document) {
             hidden = "msHidden";
-            document.addEventListener("msvisibilitychange", onchange);
+            add_event_listener(document, "msvisibilitychange", onchange);
         }
 
         /**
@@ -4648,7 +5100,7 @@ class CountlyClass {
         add_event_listener(window, "scroll", resetInactivity);
 
         // track user inactivity
-        setInterval(() => {
+        sdkSetInterval(() => {
             this.#inactivityCounter++;
             if (this.#inactivityCounter >= this.#inactivityTime) {
                 this.#stop_time();
@@ -4663,6 +5115,10 @@ class CountlyClass {
     * @param {object=} viewSegments - optional key value object with segments to report with the view
     * */
     track_pageview = (page, ignoreList, viewSegments) => {
+        if (this.#autoViewTracking) {
+            this.#log(logLevelEnums.WARNING, "track_pageview, Automatic view tracking is on, so the SDK records the pages itself and this call is ignored");
+            return;
+        }
         this.#HealthCheck.recordUsage("views", "start");
         this.#trackPageview(page, ignoreList, viewSegments);
     };
@@ -4672,8 +5128,9 @@ class CountlyClass {
      * @param {string=} page - optional name of the page, by default uses current url path
      * @param {array=} ignoreList - optional array of strings or regexps to test for the url/view name to ignore and not report
      * @param {object=} viewSegments - optional key value object with segments to report with the view
+     * @param {string=} viewUrl - the address of the page, by default what getViewUrl gives
      */
-    #trackPageview = (page, ignoreList, viewSegments) => {
+    #trackPageview = (page, ignoreList, viewSegments, viewUrl) => {
         if (!isBrowser && !page) {
             this.#log(logLevelEnums.WARNING, "track_pageview, window object is not available. Not tracking page views as page name is not provided.");
             return;
@@ -4729,10 +5186,12 @@ class CountlyClass {
                 }
             }
         }
+        viewUrl = viewUrl || this.getViewUrl();
+        this.#lastViewUrl = viewUrl;
         var segments = {
             name: page,
             visit: 1,
-            view: this.getViewUrl()
+            view: viewUrl
         };
         // truncate new segment
         segments = truncateObject(segments, this.#SCLimitKeyLength, this.#SCLimitValueSize , this.#SCLimitSegmentationValues, "track_pageview", this.#log);
@@ -4800,12 +5259,12 @@ class CountlyClass {
                 segmentation: segments
             }, this.#currentViewId);
             this.#lastView = page;
-            this.#lastViewTime = getTimestamp();
+            this.#lastViewTime = this.#callTime();
             this.#lastViewStoredDuration = 0;
             this.#log(logLevelEnums.VERBOSE, "track_pageview, last view is assigned:[" + this.#lastView + "]");
         }
         else {
-            this.#lastParams.track_pageview = [page, ignoreList, viewSegments];
+            this.#lastParams.track_pageview = [page, ignoreList, viewSegments, viewUrl];
         }
     };
 
@@ -4817,6 +5276,10 @@ class CountlyClass {
     * */
     track_view = (page, ignoreList, segments) => {
         this.#log(logLevelEnums.INFO, "track_view, Initiating tracking page views");
+        if (this.#autoViewTracking) {
+            this.#log(logLevelEnums.WARNING, "track_view, Automatic view tracking is on, so the SDK records the pages itself and this call is ignored");
+            return;
+        }
         this.#HealthCheck.recordUsage("views", "start");
         this.#trackPageview(page, ignoreList, segments);
     };
@@ -4889,7 +5352,7 @@ class CountlyClass {
                 return;
             }
             shouldProcess = false;
-            setTimeout(() => {
+            sdkSetTimeout(() => {
                 shouldProcess = true;
             }, 1000);
             if (typeof event.pageX !== "undefined" && typeof event.pageY !== "undefined") {
@@ -5005,8 +5468,9 @@ class CountlyClass {
             this.#recordInteraction(type, target, null, describeField(target));
         };
         // capture phase: a page that stops propagation still has its fields counted
-        parent.addEventListener("change", record("input"), true);
-        parent.addEventListener("submit", record("submit"), true);
+        // capture phase, outside any zone.js zone like the SDK's other listeners
+        getZoneJsOriginal(parent, "addEventListener").call(parent, "change", record("input"), true);
+        getZoneJsOriginal(parent, "addEventListener").call(parent, "submit", record("submit"), true);
     };
 
     /**
@@ -5042,8 +5506,8 @@ class CountlyClass {
         var lastStop = window.scrollY || 0;
         var timer = null;
         add_event_listener(parent, "scroll", () => {
-            clearTimeout(timer);
-            timer = setTimeout(() => {
+            sdkClearTimeout(timer);
+            timer = sdkSetTimeout(() => {
                 var y = window.scrollY || 0;
                 if (Math.abs(y - lastStop) < window.innerHeight / 4) {
                     return;
@@ -6405,8 +6869,8 @@ class CountlyClass {
 
             let resizeTimeout;
             add_event_listener(window,'resize', () => {
-                clearTimeout(resizeTimeout);
-                resizeTimeout = setTimeout(() => {
+                sdkClearTimeout(resizeTimeout);
+                resizeTimeout = sdkSetTimeout(() => {
                     const width = window.innerWidth;
                     const height = window.innerHeight;
                     const feedbackWidgetIframe = document.getElementById("countly-" + feedbackWidgetFamily + "-iframe");
@@ -6493,7 +6957,7 @@ class CountlyClass {
                         break;
 
                     case "afterConstantDelay":
-                        setTimeout(() => {
+                        sdkSetTimeout(() => {
                             if (!surveyShown) {
                                 surveyShown = true;
                                 showSurvey(presentableFeedback);
@@ -6784,6 +7248,7 @@ class CountlyClass {
             req.crash = JSON.stringify(obj);
 
             this.#toRequestQueue(req);
+            this.#handleJourneyTrigger(contentTriggerKeys.CRASH);
             if (this.#recordingBridge && typeof this.#recordingBridge.onCrash === "function") {
                 // crash trigger of Session Replay
                 this.#recordingBridge.onCrash({ nonfatal: !!nonfatal });
@@ -7010,8 +7475,8 @@ class CountlyClass {
         if (!this.#initTimestamp || (getMsTimestamp() - this.#initTimestamp) < 4000 ) {
             // settimeout
             this.#log(logLevelEnums.DEBUG, "content.enterContentZone, Not enough time passed since initialization");
-            clearTimeout(this.#contentZoneEntryTimer);
-            this.#contentZoneEntryTimer = setTimeout(() => {
+            sdkClearTimeout(this.#contentZoneEntryTimer);
+            this.#contentZoneEntryTimer = sdkSetTimeout(() => {
                 this.#contentZoneEntryTimer = null;
                 this.#enterContentZoneInternal();
             }, 4001);
@@ -7022,7 +7487,7 @@ class CountlyClass {
         if (!forced) {
             this.#sendContentRequest();
         }
-        this.#contentZoneTimer = setInterval(() => {
+        this.#contentZoneTimer = sdkSetInterval(() => {
             this.#sendContentRequest();
         }, this.#SCIntervalContent);
     };
@@ -7041,7 +7506,7 @@ class CountlyClass {
         this.#exitContentZoneInternal();
         this.#processAsyncQueue();
         this.#sendEventsForced();
-        this.#contentZoneEntryTimer = setTimeout(() => {
+        this.#contentZoneEntryTimer = sdkSetTimeout(() => {
             this.#contentZoneEntryTimer = null;
             this.#enterContentZoneInternal();
         }, 1000);
@@ -7054,7 +7519,7 @@ class CountlyClass {
      */
     #exitContentZoneInternal = () => {
         if (this.#contentZoneEntryTimer) {
-            clearTimeout(this.#contentZoneEntryTimer);
+            sdkClearTimeout(this.#contentZoneEntryTimer);
             this.#contentZoneEntryTimer = null;
         }
         if (!this.#inContentZone) {
@@ -7064,7 +7529,7 @@ class CountlyClass {
         this.#log(logLevelEnums.INFO, "content.exitContentZone, Exiting content zone");
         this.#inContentZone = false;
         if (this.#contentZoneTimer) {
-            clearInterval(this.#contentZoneTimer);
+            sdkClearInterval(this.#contentZoneTimer);
             this.#log(logLevelEnums.DEBUG, "content.exitContentZone, content zone exited");
         }
     };
@@ -7166,16 +7631,16 @@ class CountlyClass {
                 return;
             }
             this.#displayContent(response);
-            clearInterval(this.#contentZoneTimer); // prevent multiple content requests while one is on
+            sdkClearInterval(this.#contentZoneTimer); // prevent multiple content requests while one is on
             this.#removeContentListeners();
             this.#contentMessageListener = (event) => {
                 this.#interpretContentMessage(event);
             };
-            window.addEventListener('message', this.#contentMessageListener);
+            add_event_listener(window, 'message', this.#contentMessageListener);
             let resizeTimeout;
             this.#contentResizeListener = () => {
-                clearTimeout(resizeTimeout);
-                resizeTimeout = setTimeout(() => {
+                sdkClearTimeout(resizeTimeout);
+                resizeTimeout = sdkSetTimeout(() => {
                     const width = window.innerWidth;
                     const height = window.innerHeight;
                     const iframe = document.getElementById(this.#contentIframeID);
@@ -7188,7 +7653,7 @@ class CountlyClass {
                     );
                 }, 200);
             };
-            window.addEventListener('resize', this.#contentResizeListener);
+            add_event_listener(window, 'resize', this.#contentResizeListener);
             finalizeContentRequest(true);
         }, true);
     };
@@ -7335,11 +7800,11 @@ class CountlyClass {
      */
     #removeContentListeners = () => {
         if (this.#contentMessageListener) {
-            window.removeEventListener('message', this.#contentMessageListener);
+            remove_event_listener(window, 'message', this.#contentMessageListener);
             this.#contentMessageListener = null;
         }
         if (this.#contentResizeListener) {
-            window.removeEventListener('resize', this.#contentResizeListener);
+            remove_event_listener(window, 'resize', this.#contentResizeListener);
             this.#contentResizeListener = null;
         }
     };
@@ -7787,15 +8252,15 @@ class CountlyClass {
      */
     #withPushTimeout = (attempt, ms) => {
         return new Promise((resolve, reject) => {
-            var timer = setTimeout(() => {
+            var timer = sdkSetTimeout(() => {
                 this.#log(logLevelEnums.ERROR, "enable_push_notifications, The browser did not finish subscribing within [" + ms + "] ms, giving up on this attempt");
                 resolve({ subscribed: false, reason: "timeout" });
             }, ms);
             attempt.then((result) => {
-                clearTimeout(timer);
+                sdkClearTimeout(timer);
                 resolve(result);
             }, (err) => {
-                clearTimeout(timer);
+                sdkClearTimeout(timer);
                 reject(err);
             });
         });
@@ -8083,7 +8548,7 @@ class CountlyClass {
             }
         }
 
-        setTimeout(() => {
+        sdkSetTimeout(() => {
             this.#heartBeat();
         }, this.#beatInterval);
     }
@@ -8338,6 +8803,13 @@ class CountlyClass {
     }
 
     /**
+     * The time of the call the SDK is running, in seconds: the time it was made for a call that waited in Countly.q before
+     * init, otherwise now
+     * @returns {number} seconds since epoch
+     */
+    #callTime = () => (this.#replayTime ? Math.floor(this.#replayTime / 1000) : getTimestamp());
+
+    /**
      * Process queued calls
      * @memberof Countly._internals
      */
@@ -8359,7 +8831,13 @@ class CountlyClass {
             this.#log(logLevelEnums.DEBUG, "Processing queued calls:" + req);
             try {
                 if (typeof req === "function") {
-                    req();
+                    this.#replayTime = typeof req.clyCalledAt === "number" ? req.clyCalledAt : null;
+                    try {
+                        req();
+                    }
+                    finally {
+                        this.#replayTime = null;
+                    }
                 }
                 else if (Array.isArray(req) && req.length > 0) {
                     var inst = this;
@@ -9130,6 +9608,40 @@ class CountlyClass {
     })
 
     /**
+     *  Compresses a request body when request compression is on, the current server said it reads gzip, no compressed
+     *  request was refused since that answer, and the request URL has no query: the compression marker has to be the
+     *  only query of the URL
+     *  @memberof Countly._internals
+     *  @param {String} body - url encoded request body, checksum included
+     *  @param {String} url - URL the request goes to, before the marker is added
+     *  @returns {Promise<Uint8Array|null>} the gzip bytes, or null when the body goes plain
+     */
+    #compressRequestBody = (body, url) => {
+        if (!this.#requestCompressionEnabled || this.#requestCompressionBlocked || this.#gzipAcceptingUrl === null || this.#gzipAcceptingUrl !== this.url || url.indexOf("?") !== -1) {
+            return Promise.resolve(null);
+        }
+        return gzipRequestBody(body).then((compressed) => {
+            if (compressed) {
+                this.#log(logLevelEnums.DEBUG, "The request body is sent gzip-compressed, [" + body.length + "] -> [" + compressed.length + "] bytes");
+            }
+            return compressed;
+        });
+    }
+
+    /**
+     *  Stops request compression after the server or something in front of it answered a compressed request without
+     *  accepting it, until the next behavior settings answer says that the server reads compressed bodies, or the SDK
+     *  starts again
+     *  @memberof Countly._internals
+     */
+    #blockRequestCompression = () => {
+        if (!this.#requestCompressionBlocked) {
+            this.#requestCompressionBlocked = true;
+            this.#log(logLevelEnums.INFO, "A compressed request was refused, requests are sent uncompressed until a behavior settings answer says that the server reads compressed bodies, or the SDK starts again");
+        }
+    }
+
+    /**
      *  Making xml HTTP request
      *  @memberof Countly._internals
      *  @param {String} functionName - Name of the function making the request for more detailed logging
@@ -9173,6 +9685,8 @@ class CountlyClass {
                 paramSource = filtered;
             }
             (isImage ? prepareFormFields(paramSource, this.salt) : prepareParams(paramSource, this.salt)).then(saltedData => {
+                return (isImage ? Promise.resolve(null) : this.#compressRequestBody(saltedData, url)).then(compressedBody => [saltedData, compressedBody]);
+            }).then(([saltedData, compressedBody]) => {
                 var method = "POST";
                 if (this.force_post || saltedData.length >= 2000) {
                     method = "POST";
@@ -9184,7 +9698,7 @@ class CountlyClass {
                     xhr.open("GET", url + "?" + saltedData, true);
                 }
                 else {
-                    xhr.open("POST", url, true);
+                    xhr.open("POST", compressedBody ? url + "?" + requestCompressionValues.URL_MARKER : url, true);
                     xhr.setRequestHeader("Content-type", "application/x-www-form-urlencoded");
                 }
                 try {
@@ -9233,6 +9747,9 @@ class CountlyClass {
                         }
                         else {
                             this.#log(logLevelEnums.DEBUG, functionName + " Invalid response from server");
+                            if (compressedBody && xhr.status !== 0) {
+                                this.#blockRequestCompression();
+                            }
                             answer(true, params, xhr.status, xhr.responseText);
                         }
                     }
@@ -9249,7 +9766,7 @@ class CountlyClass {
                     xhr.send();
                 }
                 else {
-                    xhr.send(saltedData);
+                    xhr.send(compressedBody || saltedData);
                 }
             }).catch((err) => this.#forRequest(params, () => {
                 this.#log(logLevelEnums.ERROR, functionName + " Could not make the XML HTTP request: " + err);
@@ -9339,12 +9856,18 @@ class CountlyClass {
                 paramSource = filtered;
             }
             (isImage ? prepareFormFields(paramSource, this.salt) : prepareParams(paramSource, this.salt)).then(saltedData => {
+                var willPost = !isImage && (this.force_post || saltedData.length >= 2000);
+                return (willPost ? this.#compressRequestBody(saltedData, url) : Promise.resolve(null)).then(compressedBody => [saltedData, compressedBody]);
+            }).then(([saltedData, compressedBody]) => {
                 if (isImage) {
                     method = "POST";
                 }
                 else if (this.force_post || saltedData.length >= 2000) {
                     method = "POST";
-                    body = saltedData;
+                    body = compressedBody || saltedData;
+                    if (compressedBody) {
+                        url += "?" + requestCompressionValues.URL_MARKER;
+                    }
                 }
                 else {
                     url += "?" + saltedData;
@@ -9360,7 +9883,7 @@ class CountlyClass {
 
                 const controller = new AbortController();
                 const signal = controller.signal;
-                const timeoutId = setTimeout(() => controller.abort(), this.#requestTimeoutDuration);
+                const timeoutId = sdkSetTimeout(() => controller.abort(), this.#requestTimeoutDuration);
 
                 // Make the fetch request
                 var fetchBody = body;
@@ -9368,7 +9891,7 @@ class CountlyClass {
                 if (isImage) {
                     var formData = this.#prepareImageUploadFormData(params, saltedData);
                     if (!formData) {
-                        clearTimeout(timeoutId);
+                        sdkClearTimeout(timeoutId);
                         if (typeof callback === 'function') { callback(true, params, 'invalid_formdata'); }
                         return;
                     }
@@ -9385,7 +9908,7 @@ class CountlyClass {
                     body: fetchBody,
                     signal: signal
                 }).then((res) => {
-                    clearTimeout(timeoutId);
+                    sdkClearTimeout(timeoutId);
                     response = res;
                     return response.text();
                 }).then((data) => this.#forRequest(params, () => {
@@ -9414,12 +9937,15 @@ class CountlyClass {
                     }
                     else {
                         this.#log(logLevelEnums.DEBUG, functionName + " Invalid response from server");
+                        if (compressedBody) {
+                            this.#blockRequestCompression();
+                        }
                         if (typeof callback === "function") {
                             callback(true, params, response.status, data);
                         }
                     }
                 })).catch((error) => this.#forRequest(params, () => {
-                    clearTimeout(timeoutId);
+                    sdkClearTimeout(timeoutId);
                     if (error.name === 'AbortError') {
                         this.#log(logLevelEnums.DEBUG, functionName + " timed out after 30 seconds");
                         if (typeof callback === "function") {
@@ -10044,8 +10570,8 @@ class CountlyClass {
             return;
         }
         this.#collectUntil = signal.at + tabHandoverTimes.COLLECT;
-        clearTimeout(this.#collectTimer);
-        this.#collectTimer = setTimeout(() => {
+        sdkClearTimeout(this.#collectTimer);
+        this.#collectTimer = sdkSetTimeout(() => {
             this.#collectTimer = null;
             this.#collectUntil = 0;
             if (this.#halted) {
@@ -10110,8 +10636,8 @@ class CountlyClass {
             return;
         }
         this.#pausedUntil = getMsTimestamp() + tabHandoverTimes.PAUSE;
-        clearTimeout(this.#pauseTimer);
-        this.#pauseTimer = setTimeout(() => {
+        sdkClearTimeout(this.#pauseTimer);
+        this.#pauseTimer = sdkSetTimeout(() => {
             this.#pauseTimer = null;
             this.#pausedUntil = 0;
             if (this.#halted) {
