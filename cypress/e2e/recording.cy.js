@@ -113,6 +113,47 @@ function queuedEvents() {
     });
 }
 
+/**
+ * Opens the page that loads the module before init and tracks its view right after init
+ * (fixtures/recording_before_init.html), from a clean storage
+ * @param {Object} conf - merged into the init config
+ * @param {Object} opts - {consent: give the session_replay consent, late: keep the server's settings back}
+ */
+function openBeforeInit(conf, opts) {
+    var query = "?c=" + encodeURIComponent(JSON.stringify(conf || {})) + (opts.consent ? "&consent=1" : "") + (opts.late ? "&sc=late" : "");
+    hp.haltAndClearStorage(() => {
+        cy.visit("./cypress/fixtures/recording_before_init.html" + query);
+    });
+    cy.window().its("Countly.recording.version").should("equal", "0.1.0");
+}
+
+/**
+ * Delivers server settings to the page as a later answer would arrive (through the stored config)
+ * @param {Object} c - the settings
+ */
+function deliverServerSettings(c) {
+    cy.window().then((win) => {
+        var key = hp.appKey + "/cly_config";
+        var value = JSON.stringify({ v: 2, t: Date.now(), c: c });
+        win.localStorage.setItem(key, value);
+        win.dispatchEvent(new win.StorageEvent("storage", { key: key, newValue: value }));
+    });
+}
+
+/**
+ * The page's view from the request queue, once the SDK turned it into a request
+ * @param {string} name - the view's name
+ * @returns {Cypress.Chainable<Object>} {event, rsid}
+ */
+function queuedView(name) {
+    cy.wait(1500);
+    return queuedEvents().then((events) => {
+        var view = events.find((e) => e.event.key === "[CLY]_view" && e.event.segmentation && e.event.segmentation.name === name);
+        expect(view, "the view " + name).to.exist;
+        return view;
+    });
+}
+
 describe("Session Replay recording", () => {
     beforeEach(() => {
         // the crash test's error is for the SDK to report, not a failure of the test
@@ -280,6 +321,73 @@ describe("Session Replay recording", () => {
         });
         queuedEvents().then((events) => {
             expect(events.find((e) => e.event.key === "after_withdrawal").rsid).to.equal(undefined);
+        });
+    });
+    describe("loaded before init", () => {
+        it("attaches during init, so the page's first view carries the tab's stream", () => {
+            var uploads = acceptUploads();
+            openBeforeInit({ recording: { keyframeInterval: 2 } }, { consent: true });
+            cy.window().its("Countly.recording").invoke("status").its("buffering").should("equal", true);
+            queuedView("landing").then((view) => {
+                cy.window().then((win) => {
+                    var stream = win.sessionStorage.getItem("cly_rsid");
+                    expect(stream).to.match(/^s[0-9a-f]{24}$/);
+                    expect(view.rsid).to.equal(stream);
+                });
+            });
+            cy.wrap(uploads).should("have.length", 0);
+        });
+
+        it("before the server's settings arrive, the first view carries the stream, and a study they start records on it", () => {
+            var uploads = acceptUploads();
+            var study = { id: "study_late", until: Date.now() + 3600000, md: 600, idle: 300, ia: false, av: false };
+            var stream = null;
+            // the page's own settings record nothing: only the server's later answer does
+            openBeforeInit({ recording: { enabled: false, keyframeInterval: 2 } }, { consent: true, late: true });
+            cy.window().its("Countly.recording").invoke("status").its("buffering").should("equal", false);
+            queuedView("landing").then((view) => {
+                cy.window().then((win) => {
+                    stream = win.sessionStorage.getItem("cly_rsid");
+                    expect(view.rsid, "the first view, before any setting").to.equal(stream);
+                    expect(win.Countly.recording.status().study).to.equal(null);
+                });
+            });
+            deliverServerSettings({ rec: false, rec_st: study });
+            cy.window().its("Countly.recording").invoke("status").its("study.id").should("equal", "study_late");
+            cy.wrap(null, { timeout: 10000 }).should(() => {
+                var chunk = uploads.find((u) => u.meta && u.meta.study === "study_late");
+                expect(chunk, "a chunk of the study recording").to.exist;
+                expect(chunk.query.stream).to.equal(stream);
+            });
+            cy.window().then((win) => {
+                win.Countly.add_event({ key: "while_recording" });
+            });
+            // the heartbeat turns the event into a request
+            cy.wait(1500);
+            queuedEvents().then((events) => {
+                expect(events.find((e) => e.event.key === "while_recording").rsid).to.equal(stream);
+            });
+            cy.window().then((win) => {
+                win.Countly.recording.stop();
+            });
+        });
+
+        it("when the server's settings record nothing, the requests after them carry no stream", () => {
+            var uploads = acceptUploads();
+            openBeforeInit({ recording: { enabled: false } }, { consent: true, late: true });
+            queuedView("landing").then((view) => {
+                expect(view.rsid, "the first view, before the settings").to.match(/^s[0-9a-f]{24}$/);
+            });
+            deliverServerSettings({ rec: false });
+            cy.window().then((win) => {
+                expect(win.Countly.recording.status().buffering).to.equal(false);
+                win.Countly.add_event({ key: "after_settings" });
+            });
+            cy.wait(1500);
+            queuedEvents().then((events) => {
+                expect(events.find((e) => e.event.key === "after_settings").rsid).to.equal(undefined);
+            });
+            cy.wrap(uploads).should("have.length", 0);
         });
     });
 });

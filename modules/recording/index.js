@@ -1,5 +1,6 @@
 // Countly Session Replay recording module (countly_recording.js). Load it after the
-// Countly SDK. It records the screen with the active recorder (cly-wire built in; rrweb
+// Countly SDK and before Countly.init, so it attaches during init and the page's first view
+// carries the tab's stream (loaded after init, it attaches at once). It records the screen with the active recorder (cly-wire built in; rrweb
 // through the plugin/rrweb file) and sends recordings to the Countly server:
 //
 // - triggered recordings: a rolling buffer of the last `window` seconds, sent with `after`
@@ -16,6 +17,8 @@ import { createOutbox } from "./outbox.js";
 import { createBufferMirror } from "./buffer-mirror.js";
 
 var VERSION = "0.1.0";
+// how long a page waits for its server settings before deciding that nothing records (see syncStream)
+var SETTINGS_WAIT_MS = 3000;
 var DEFAULTS = {
     enabled: true,
     window: 40,
@@ -142,6 +145,11 @@ function createRecordingModule(Countly) {
     var lastRid = null;
     var bufferWanted = false;
     var stopped = false;
+    // until this page's server settings arrive, or SETTINGS_WAIT_MS pass, the tab's stream is on
+    // whenever consent allows, also before anything records: the page's first view leaves before
+    // them, and a recording they start must still find it
+    var awaitingSettings = true;
+    var settingsTimer = setTimeout(settingsArrived, SETTINGS_WAIT_MS);
     var mirror = createBufferMirror({ clock: clock });
     var outbox = createOutbox({
         clock: clock,
@@ -377,8 +385,32 @@ function createRecordingModule(Countly) {
         return null;
     }
 
-    /** Begin the rolling buffer and/or study capture, as the settings and consent allow. */
+    /**
+     * The tab's stream on the SDK's requests (PLAN.md 5.4): on while capturing, and while this page
+     * still waits for its server settings; off otherwise.
+     */
+    function syncStream() {
+        var on = !stopped && bridge.hasConsent() && bridge.isTracking() && (!!capture || awaitingSettings);
+        bridge.setStream(on ? streamId() : null);
+    }
+
+    /** This page's server settings arrived (or will not): the stream stays on only while capturing. */
+    function settingsArrived() {
+        if (awaitingSettings) {
+            awaitingSettings = false;
+            clearTimeout(settingsTimer);
+            syncStream();
+        }
+    }
+
+    /** Begin what the settings and consent allow, and set the stream to match. */
     function ensureCapture() {
+        startCapture();
+        syncStream();
+    }
+
+    /** Begin the rolling buffer and/or study capture, as the settings and consent allow. */
+    function startCapture() {
         if (stopped || !bridge.hasConsent() || !bridge.isTracking()) {
             if (capture && !bridge.isTracking()) {
                 stopCapture();
@@ -616,6 +648,7 @@ function createRecordingModule(Countly) {
         },
         onServerConfig: function() {
             ensureCapture();
+            settingsArrived();
         }
     });
 
@@ -717,24 +750,51 @@ window.__countlyRecorders = { push: function(entry) {
     registerRecorder(entry[0], entry[1]);
 } };
 
-/** Attach to the SDK once it is initialized. */
-function attach() {
-    var Countly = window.Countly;
-    if (!Countly || !Countly._internals || !Countly._internals.recording || !Countly.app_key) {
-        setTimeout(attach, 200);
-        return;
-    }
+/**
+ * Attach to an initialized SDK instance, once, and make its API `Countly.recording`.
+ * @param {Object} Countly - the global Countly object, which carries the API
+ * @param {Object} instance - the SDK instance to record for
+ */
+function attachTo(Countly, instance) {
     if (Countly.recording && Countly.recording.version) {
         return;
     }
     var queued = Array.isArray(Countly.recording) ? Countly.recording : [];
-    Countly.recording = createRecordingModule(Countly);
+    Countly.recording = createRecordingModule(instance);
     Countly.recording.version = VERSION;
     queued.forEach(function(call) {
         if (Countly.recording[call[0]]) {
             Countly.recording[call[0]].apply(null, call.slice(1));
         }
     });
+}
+
+var waitingForInit = false;
+
+/**
+ * Attach to the SDK. Loaded after init, at once. Loaded before it, during init
+ * (`Countly._onInit`), before the page's first requests are made, so they carry the tab's
+ * stream. Until the SDK is there, and as a fallback, it looks again every 200 ms.
+ */
+function attach() {
+    var Countly = window.Countly;
+    if (Countly && Countly._internals && Countly._internals.recording && Countly.app_key) {
+        attachTo(Countly, Countly);
+        return;
+    }
+    if (Countly && Countly.recording && Countly.recording.version) {
+        return;
+    }
+    if (Countly && !waitingForInit) {
+        waitingForInit = true;
+        Countly._onInit = Countly._onInit || [];
+        Countly._onInit.push(function(instance) {
+            if (instance._internals && instance._internals.recording) {
+                attachTo(Countly, instance);
+            }
+        });
+    }
+    setTimeout(attach, 200);
 }
 
 if (typeof window !== "undefined") {

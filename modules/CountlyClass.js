@@ -377,6 +377,10 @@ class CountlyClass {
 
         this.#initialize(ob);
 
+        // modules on the page before init (the recording module) attach here, before the first
+        // heartbeat turns what the page queued into requests
+        this.#runInitHooks();
+
         // start SDK
         this.#notifyLoaders();
 
@@ -7458,6 +7462,26 @@ class CountlyClass {
     /**
      *  Notify all waiting callbacks that script was loaded and instance created
      */
+    /**
+     * Calls what modules loaded before init left in `Countly._onInit`, with this instance, once.
+     * Only the first (global) instance runs them: it is the one `window.Countly` names. The
+     * recording module attaches this way, so the stream it sets is on the page's first requests.
+     */
+    #runInitHooks = () => {
+        if (!this.#global || !Array.isArray(Countly._onInit)) {
+            return;
+        }
+        var hooks = Countly._onInit.splice(0);
+        for (var i = 0; i < hooks.length; i++) {
+            try {
+                hooks[i](this);
+            }
+            catch (e) {
+                this.#log(logLevelEnums.ERROR, "initialize, a module failed to attach: " + e);
+            }
+        }
+    }
+
     #notifyLoaders = () => {
         // notify load waiters
         var i;

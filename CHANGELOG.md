@@ -12,7 +12,7 @@
 * Added rage, dead and error clicks to `track_clicks`, recorded as `[CLY]_action` `rage_click`, `dead_click` and `error_click`. Each is on by default and can be turned off with `track_clicks({ rage: false })` (or `track_clicks(parent, options)`). Apps that already call `track_clicks` send these new event types after updating.
 * Added the clicked element (`sel`, `tag`, the visible label `txt` unless masked with `cly-mask`), the viewport size (`vw`, `vh`) and the scroll position (`sx`, `sy`) to `[CLY]_action` clicks. Elements inside `cly-ignore` are not tracked.
 * Added `scroll_stop` to `track_scrolls`: a `[CLY]_action` when scrolling settles after moving at least a quarter of the viewport.
-* Added the hooks the Session Replay recording module (`countly_recording.js`) uses, and the `rsid` request parameter it sets while recording.
+* Added the hooks the Session Replay recording module (`countly_recording.js`) uses, and the `rsid` request parameter it sets while recording. Loaded before `init`, the module attaches during `init`, so the page's first requests carry `rsid` too.
 * Improved internal logging.
 * Improved health check send count. It is now sent once per visit, when a new session begins, and once per page load only on pages that track no session.
 
